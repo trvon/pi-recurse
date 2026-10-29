@@ -155,7 +155,7 @@ export class HandleStore {
       if (!st?.isFile()) continue;
       const rel = relative(options.cwd, abs) || abs;
       if (bytes + st.size > options.maxBytes) {
-        throw new Error(`input exceeds ${options.maxBytes} bytes at ${rel}. Narrow the pattern or raise PI_RECURSE_MAX_LOAD_BYTES.`);
+        throw new Error(`input exceeds ${options.maxBytes} bytes at ${rel}. Narrow the pattern or raise maxLoadBytes in pi-recurse.json.`);
       }
       const buf = await readFile(abs);
       if (isBinary(buf)) {

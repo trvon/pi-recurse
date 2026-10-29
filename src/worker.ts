@@ -48,7 +48,7 @@ export class Worker {
     return Math.max(0, this.config.maxCalls - this.calls);
   }
 
-  /** Model to use: per-call override, then PI_RECURSE_WORKER, then the session's model. */
+  /** Model to use: per-call override, then the configured worker, then the session's model. */
   resolveModel(runtime: ModelRuntime, sessionModel: unknown, override?: string): { model: unknown; name: string } {
     const spec = override ? parseModelSpec(override) : this.config.worker;
     if (override && !spec) throw new Error(`model "${override}" must look like "provider/model"`);
@@ -57,7 +57,7 @@ export class Worker {
       if (!model) throw new Error(`model ${spec.provider}/${spec.model} is not configured in pi`);
       return { model, name: `${spec.provider}/${spec.model}` };
     }
-    if (!sessionModel) throw new Error("no worker model: set PI_RECURSE_WORKER=provider/model or pick a session model");
+    if (!sessionModel) throw new Error("no worker model: set worker in pi-recurse.json or pick a session model");
     const m = sessionModel as { provider?: string; id?: string };
     return { model: sessionModel, name: `${m.provider ?? "?"}/${m.id ?? "?"}` };
   }
@@ -76,7 +76,7 @@ export class Worker {
     const { model, name } = this.resolveModel(runtime, sessionModel, input.model);
     const prompt = this.buildPrompt(input);
     if (this.calls >= this.config.maxCalls) {
-      throw new Error(`llm_query budget of ${this.config.maxCalls} calls is used up (PI_RECURSE_MAX_CALLS)`);
+      throw new Error(`llm_query budget of ${this.config.maxCalls} calls is used up (maxCalls in pi-recurse.json)`);
     }
     this.calls++;
     const message = await this.limiter.run(() =>

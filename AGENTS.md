@@ -10,7 +10,7 @@ Stack: strict TypeScript, ES2022, TypeBox, Vitest, and Biome. Targets `@earendil
 
 ```text
 src/index.ts     extension entry point and public exports
-src/config.ts    environment configuration (PI_RECURSE_*)
+src/config.ts    config files (~/.pi/agent/pi-recurse.json, .pi/pi-recurse.json) and defaults
 src/handles.ts   in-memory handle store: load, ranges, grep
 src/worker.ts    worker model calls: model resolution, budget, concurrency
 src/limiter.ts   FIFO concurrency limiter
@@ -21,11 +21,13 @@ src/child.ts     rlm_query sub-agent: in-process SDK session with codemode and t
 ## Rules
 
 - Tools default to `exposure: "codemode"` and return `structuredContent` matching their `outputSchema`; keep both in sync.
-- Never return a whole handle by default: peeks are capped, and sub-query prompts are bounded by `PI_RECURSE_MAX_PROMPT_CHARS`.
+- Never return a whole handle by default: peeks are capped, and sub-query prompts are bounded by `maxPromptChars`.
 - `rlm_query` children share the parent's handle store and worker (budget, concurrency); `runChild` is injected into `registerTools` so tests never start real sessions.
 - Children stay read-only (`CHILD_EXCLUDED_TOOLS`) and load no extensions, skills or context files besides codemode and pi-recurse.
 - Model calls go through `ctx.modelRegistry` only; no direct HTTP clients or API keys in this package.
 - Keep `scripts/package-smoke.mjs` working with both npm <= 11 (array) and npm 12 (object) `npm pack --json` output.
+
+- Configuration comes from the JSON files only, not environment variables. New settings get a default in `DEFAULTS`, validation in `resolveConfig`, and a row in the README table.
 
 ## Checks
 

@@ -221,7 +221,7 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     exposure,
     executionMode: "parallel",
     description:
-      "Run many llm_query sub-queries concurrently (bounded by PI_RECURSE_CONCURRENCY) and return the answers in order. Each item takes the same fields as llm_query. Failed items carry an error instead of text.",
+      "Run many llm_query sub-queries concurrently (bounded by the configured concurrency) and return the answers in order. Each item takes the same fields as llm_query. Failed items carry an error instead of text.",
     parameters: Type.Object({ queries: Type.Array(QueryParams, { minItems: 1, maxItems: 256 }) }),
     prepareArguments: (args: unknown) => {
       const a = args as { queries?: unknown };

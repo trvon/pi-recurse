@@ -23,28 +23,44 @@ By default the tools are exposed **only to codemode scripts** (`exposure: "codem
 | `rlm_load({ paths?, text?, exclude? })` | Load files, directories, globs or literal text into memory; returns `{ handle, files, lines, chars, bytes, skipped }`. Skips `node_modules`, `.git`, build output and binary files. |
 | `rlm_peek({ handle, pattern? \| file? \| lines? \| chars? \| list_files?, ... })` | Regex search per line (with `context`, or `files_only` for paths), read one file or a range, or list files. With no selector it returns the file list and a hint, never the whole handle. Output is capped (`max_chars`). `grep`, `regex`, `query` and `search` are accepted as aliases for `pattern`. |
 | `llm_query({ prompt, handle?, file?, lines?, chars?, text?, system?, model?, max_tokens? })` | One sub-query to the worker model about a slice of a handle (or literal text). Returns `{ text, model }`. |
-| `llm_query_batched({ queries: [...] })` | Many sub-queries concurrently, bounded by `PI_RECURSE_CONCURRENCY`; returns results in order, with per-item errors, and reports progress. |
-| `rlm_query({ task, handle?, file?, lines?, chars?, text?, model? })` | Recursive call: runs `task` in a fresh in-process sub-agent session with codemode and these tools (one level deeper), on the handle or slice. Returns `{ answer, depth, model }`. Sub-agents are read-only (no `bash`, `edit`, `write`). Not registered at `PI_RECURSE_MAX_DEPTH`. |
+| `llm_query_batched({ queries: [...] })` | Many sub-queries concurrently, bounded by `concurrency`; returns results in order, with per-item errors, and reports progress. |
+| `rlm_query({ task, handle?, file?, lines?, chars?, text?, model? })` | Recursive call: runs `task` in a fresh in-process sub-agent session with codemode and these tools (one level deeper), on the handle or slice. Returns `{ answer, depth, model }`. Sub-agents are read-only (no `bash`, `edit`, `write`). Not registered at `maxDepth`. |
 | `rlm_handles({ drop? })` | List loaded handles, or drop ones you no longer need. |
 
 
 ## Configuration
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `PI_RECURSE_WORKER` | session model | Worker for sub-queries, `provider/model` (for example `llamacpp/flint`). |
-| `PI_RECURSE_CONCURRENCY` | `2` | Sub-queries at once. Match the worker server's slots (`llama-server -np`). |
-| `PI_RECURSE_MAX_CALLS` | `500` | Total sub-queries per pi process. |
-| `PI_RECURSE_MAX_PROMPT_CHARS` | `200000` | Largest single sub-query (context + prompt). |
-| `PI_RECURSE_MAX_LOAD_BYTES` | `64 MiB` | Largest `rlm_load`. |
-| `PI_RECURSE_MAX_LOAD_FILES` | `5000` | Most files per `rlm_load`. |
-| `PI_RECURSE_EXPOSURE` | `codemode` | `direct` also lists the tools to the model directly. |
-| `PI_RECURSE_MAX_DEPTH` | `2` | Deepest `rlm_query` nesting; `0` turns recursion off. |
-| `PI_RECURSE_CHILD_MODEL` | worker, then session model | Model for `rlm_query` sub-agents, `provider/model`. |
-| `PI_RECURSE_CHILD_THINKING` | `low` | Thinking level for sub-agents (`off` … `high`). |
-| `PI_RECURSE_CHILD_TIMEOUT_MS` | `600000` | Wall-clock limit per sub-agent. |
+Settings come from JSON files, with defaults that work without any file: sub-queries use the session's model.
 
-With a local `llama-server` worker, run it with at least as many slots as `PI_RECURSE_CONCURRENCY` (`-np 2`), so sub-queries don't evict your main session's prompt cache. Sub-agents and their sub-queries share the same handle store, call budget and concurrency limit as the top-level session.
+- `~/.pi/agent/pi-recurse.json`: your defaults.
+- `.pi/pi-recurse.json` in a project: overrides the global file for that project.
+
+Every key is optional. A typical local setup:
+
+```json
+{
+  "worker": "llamacpp/flint",
+  "concurrency": 2
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `worker` | session model | Worker for sub-queries, `"provider/model"` (for example `"llamacpp/flint"`). |
+| `concurrency` | `2` | Sub-queries at once. Keep it below the worker server's slots (`llama-server -np`). |
+| `maxCalls` | `500` | Total sub-queries per pi process, including sub-agents. |
+| `maxPromptChars` | `200000` | Largest single sub-query (context + prompt). |
+| `maxLoadBytes` | `67108864` (64 MiB) | Largest `rlm_load`. |
+| `maxLoadFiles` | `5000` | Most files per `rlm_load`. |
+| `exposure` | `"codemode"` | `"direct"` also lists the tools to the model directly. |
+| `maxDepth` | `2` | Deepest `rlm_query` nesting; `0` turns recursion off. |
+| `childModel` | worker, then session model | Model for `rlm_query` sub-agents, `"provider/model"`. |
+| `childThinking` | `"low"` | Thinking level for sub-agents (`off`, `minimal`, `low`, `medium`, `high`). |
+| `childTimeoutMs` | `600000` | Wall-clock limit per sub-agent. |
+
+Invalid values and unknown keys are skipped with a warning at session start. `/recurse` shows the settings in effect and which files they came from.
+
+With a local `llama-server` worker, give it more slots than `concurrency` (for example `-np 4` with `concurrency: 2`), so sub-queries don't evict your main session's prompt cache. Sub-agents and their sub-queries share the same handle store, call budget and concurrency limit as the top-level session.
 
 See [docs/USAGE.md](docs/USAGE.md) for patterns and limits.
 

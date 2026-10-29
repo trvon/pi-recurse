@@ -1,10 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import type { ChildRequest } from "../src/child.js";
-import { loadConfig } from "../src/config.js";
+import { type RecurseConfigFile, resolveConfig } from "../src/config.js";
 import { HandleStore } from "../src/handles.js";
 import { registerTools, restoreStructuredResults } from "../src/tools.js";
 import { Worker } from "../src/worker.js";
+
+const cfg = (file: RecurseConfigFile) => resolveConfig([{ source: "test", data: file }]).config;
 
 interface Registered {
   name: string;
@@ -13,10 +15,10 @@ interface Registered {
   execute: (id: string, params: unknown, signal: AbortSignal | undefined, onUpdate: ((u: { details: unknown }) => void) | undefined, ctx: unknown) => Promise<{ structuredContent?: unknown; content: { text: string }[] }>;
 }
 
-function setup(env: Record<string, string> = { PI_RECURSE_WORKER: "llamacpp/flint" }, depth = 0) {
+function setup(env: RecurseConfigFile = { worker: "llamacpp/flint" }, depth = 0) {
   const tools = new Map<string, Registered>();
   const pi = { registerTool: (t: Registered) => tools.set(t.name, t) } as unknown as ExtensionAPI;
-  const config = loadConfig(env);
+  const config = cfg(env);
   const store = new HandleStore();
   const children: (ChildRequest & { seen: string })[] = [];
   const runChild = async (req: ChildRequest) => {
@@ -55,9 +57,9 @@ describe("registered tools", () => {
     const { tools } = setup();
     expect([...tools.keys()]).toEqual(["rlm_load", "rlm_peek", "llm_query", "llm_query_batched", "rlm_handles", "rlm_query"]);
     expect(setup(undefined, 2).tools.has("rlm_query")).toBe(false);
-    expect(setup({ PI_RECURSE_MAX_DEPTH: "0" }).tools.has("rlm_query")).toBe(false);
+    expect(setup({ maxDepth: 0 }).tools.has("rlm_query")).toBe(false);
     expect([...tools.values()].every((t) => t.exposure === "codemode")).toBe(true);
-    expect(setup({ PI_RECURSE_EXPOSURE: "direct" }).tools.get("rlm_load")?.exposure).toBe("direct");
+    expect(setup({ exposure: "direct" }).tools.get("rlm_load")?.exposure).toBe("direct");
   });
 
   it("loads, peeks and queries with structured results", async () => {
@@ -125,7 +127,7 @@ describe("registered tools", () => {
   });
 
   it("rlm_query turns a slice into a private handle and drops it afterwards", async () => {
-    const { call, children, store } = setup({ PI_RECURSE_WORKER: "llamacpp/flint", PI_RECURSE_CHILD_MODEL: "local/small" });
+    const { call, children, store } = setup({ worker: "llamacpp/flint", childModel: "local/small" });
     const load = (await call("rlm_load", { text: "a\nb\nc" })).structuredContent as { handle: string };
     const r = (await call("rlm_query", { task: "t", handle: load.handle, lines: { start: 2, count: 2 } })).structuredContent as { model: string; handle: string };
     expect(r.model).toBe("local/small");

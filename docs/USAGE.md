@@ -33,9 +33,9 @@ Tools take `handle` as the id string from `rlm_load`. They also accept the whole
 
 - Handles are in memory for the current pi process; reload after a restart.
 - Codemode scripts have 256 MB of VM memory: aggregate answers instead of collecting large text.
-- `llm_query` refuses prompts over `PI_RECURSE_MAX_PROMPT_CHARS`; split the context.
-- `PI_RECURSE_MAX_CALLS` stops runaway loops; the batched tool reports how many calls are left. The budget covers sub-agents too.
-- Sub-agents run in-process with no extensions, skills, context files or session file, and without `bash`, `edit` and `write`. Each is stopped after `PI_RECURSE_CHILD_TIMEOUT_MS`.
+- `llm_query` refuses prompts over `maxPromptChars`; split the context.
+- `maxCalls` stops runaway loops; the batched tool reports how many calls are left. The budget covers sub-agents too.
+- Sub-agents run in-process with no extensions, skills, context files or session file, and without `bash`, `edit` and `write`. Each is stopped after `childTimeoutMs`.
 - A slice passed to `rlm_query` becomes a temporary handle that is dropped when the call returns. Drop your own large handles with `rlm_handles({ drop })`.
 
 ## Choosing a worker

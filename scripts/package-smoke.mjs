@@ -22,7 +22,7 @@ for (const path of files) {
 const mod = await import(pathToFileURL(resolve("dist/index.js")).href);
 const names = [];
 const events = [];
-mod.default({ registerTool: (tool) => names.push(tool.name), on: (event) => events.push(event) });
+mod.default({ registerTool: (tool) => names.push(tool.name), on: (event) => events.push(event), registerCommand: () => {} });
 if (!events.includes("tool_result")) throw new Error("expected a tool_result hook");
 const expected = ["rlm_load", "rlm_peek", "llm_query", "llm_query_batched", "rlm_handles", "rlm_query"];
 if (JSON.stringify(names) !== JSON.stringify(expected)) throw new Error(`registered ${names.join(",")}, expected ${expected.join(",")}`);
