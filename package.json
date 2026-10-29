@@ -1,0 +1,70 @@
+{
+  "name": "@trevonistrevon/pi-recurse",
+  "version": "0.1.0",
+  "description": "Recursive Language Model (RLM) tools for Pi's codemode: load large inputs by handle, explore them in scripts, and fan out sub-queries to a (local) worker model.",
+  "author": "trevonistrevon",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trvon/pi-recurse.git"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "codemode",
+    "rlm",
+    "recursive-language-model",
+    "long-context"
+  ],
+  "files": [
+    "dist/",
+    "docs/USAGE.md",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=1.4.0"
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc",
+    "audit:all": "npm audit",
+    "prepublishOnly": "npm run audit:all && npm run lint && npm run typecheck && npm run test && npm run build && npm run test:package",
+    "test:package": "node scripts/package-smoke.mjs",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "hooks:install": "git config core.hooksPath .githooks",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.dev.json",
+    "lint": "biome check src/ test/",
+    "lint:fix": "biome check --fix src/ test/"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.15",
+    "@earendil-works/pi-coding-agent": "^1.4.0",
+    "@types/node": "^26.6.6",
+    "@vitest/coverage-v8": "^5.0.5",
+    "typebox": "^1.4.3",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
