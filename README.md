@@ -27,18 +27,6 @@ By default the tools are exposed **only to codemode scripts** (`exposure: "codem
 | `rlm_query({ task, handle?, file?, lines?, chars?, text?, model? })` | Recursive call: runs `task` in a fresh in-process sub-agent session with codemode and these tools (one level deeper), on the handle or slice. Returns `{ answer, depth, model }`. Sub-agents are read-only (no `bash`, `edit`, `write`). Not registered at `PI_RECURSE_MAX_DEPTH`. |
 | `rlm_handles({ drop? })` | List loaded handles, or drop ones you no longer need. |
 
-A script in the RLM style:
-
-```js
-const repo = await tools.rlm_load({ paths: ["src"] });
-const { files } = await tools.rlm_peek({ handle: repo.handle, list_files: true });
-const answers = await tools.llm_query_batched({
-  queries: files.map((f) => ({ prompt: "List every network call in this file, one per line, or NONE.", handle: repo.handle, file: f.path })),
-});
-return files
-  .map((f, i) => [f.path, answers.results[i].text ?? answers.results[i].error])
-  .filter(([, a]) => a && !a.includes("NONE"));
-```
 
 ## Configuration
 

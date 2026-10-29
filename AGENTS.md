@@ -34,3 +34,7 @@ npm run lint && npm run typecheck && npm test && npm run build && npm run test:p
 ```
 
 Commits follow Conventional Commits (release-please builds the changelog).
+
+## Releases
+
+release-please opens a release PR from Conventional Commits on `master`; merging it tags the release and the `npm-publish` job publishes with provenance using the `NPM_TOKEN` repository secret. `release-as: "0.1.0"` in `release-please-config.json` exists only for the first release: remove it once v0.1.0 is out.

@@ -1,6 +1,6 @@
 {
   "name": "@trevonistrevon/pi-recurse",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "Recursive Language Model (RLM) tools for Pi's codemode: load large inputs by handle, explore them in scripts, and fan out sub-queries to a (local) worker model.",
   "author": "trevonistrevon",
   "license": "MIT",
@@ -66,5 +66,9 @@
     "typebox": "^1.4.3",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
+  },
+  "overrides": {
+    "postcss": "^8.5.29",
+    "undici": "^8.12.3"
   }
 }
