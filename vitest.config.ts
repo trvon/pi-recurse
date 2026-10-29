@@ -9,8 +9,9 @@ export default defineConfig({
     hookTimeout: 15000,
     coverage: {
       provider: "v8",
-      reporter: ["text-summary", "html", "json"],
+      reporter: ["text-summary", "html", "json", "lcov"],
       include: ["src/**/*.ts"],
+      thresholds: { statements: 95, branches: 90, functions: 95, lines: 95 },
     },
   },
 });

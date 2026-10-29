@@ -28,6 +28,8 @@ export interface RecurseConfig {
   childThinking: ThinkingLevel;
   /** Wall-clock limit for one rlm_query child, in milliseconds. */
   childTimeoutMs: number;
+  /** Add a system prompt guideline that points the model at the RLM tools for large inputs. */
+  steer: boolean;
 }
 
 /** The JSON file format: every key optional, models as "provider/model" strings. */
@@ -43,6 +45,7 @@ export interface RecurseConfigFile {
   childModel?: string | null;
   childThinking?: ThinkingLevel;
   childTimeoutMs?: number;
+  steer?: boolean;
 }
 
 export const CONFIG_FILE = "pi-recurse.json";
@@ -59,6 +62,7 @@ export const DEFAULTS: RecurseConfig = {
   child: undefined,
   childThinking: "low",
   childTimeoutMs: 600_000,
+  steer: true,
 };
 
 const THINKING: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
@@ -117,6 +121,9 @@ export function resolveConfig(layers: { source: string; data: unknown }[]): Load
       } else if (key === "exposure") {
         if (value === "codemode" || value === "direct") config.exposure = value;
         else bad(key, 'must be "codemode" or "direct"');
+      } else if (key === "steer") {
+        if (typeof value === "boolean") config.steer = value;
+        else bad(key, "must be true or false");
       } else if (key === "childThinking") {
         if (typeof value === "string" && (THINKING as readonly string[]).includes(value)) config.childThinking = value as ThinkingLevel;
         else bad(key, `must be one of ${THINKING.join(", ")}`);
@@ -167,5 +174,6 @@ export function describeConfig(config: RecurseConfig): RecurseConfigFile {
     childModel: spec(config.child),
     childThinking: config.childThinking,
     childTimeoutMs: config.childTimeoutMs,
+    steer: config.steer,
   };
 }

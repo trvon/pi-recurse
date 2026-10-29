@@ -194,9 +194,22 @@ export class HandleStore {
 
   /** Lines [start, start+count) of the handle text, 1-based. */
   lineRange(id: string, start: number, count: number): string {
-    const lines = this.get(id).text.split("\n");
-    const from = Math.max(1, start) - 1;
-    return lines.slice(from, from + Math.max(0, count)).join("\n");
+    const text = this.get(id).text;
+    if (count <= 0) return "";
+    let from = 0;
+    for (let line = 1; line < Math.max(1, start); line++) {
+      const next = text.indexOf("\n", from);
+      if (next < 0) return "";
+      from = next + 1;
+    }
+    let end = from;
+    for (let line = 0; line < count; line++) {
+      const next = text.indexOf("\n", end);
+      if (next < 0) return text.slice(from);
+      if (line === count - 1) return text.slice(from, next);
+      end = next + 1;
+    }
+    return "";
   }
 
   charRange(id: string, start: number, end: number): string {
@@ -218,15 +231,20 @@ export class HandleStore {
     const lines = h.text.split("\n");
     let offset = 0;
     let fileIdx = 0;
+    let fileLine = 0;
     for (let i = 0; i < lines.length && out.length < max; i++) {
       const line = lines[i] ?? "";
-      while (fileIdx < h.files.length && offset > (h.files[fileIdx]?.end ?? 0)) fileIdx++;
+      while (fileIdx < h.files.length && offset > (h.files[fileIdx]?.end ?? 0)) {
+        fileIdx++;
+        fileLine = 0;
+      }
       const file = h.files[fileIdx];
+      const inFile = file && offset >= file.start && offset <= file.end;
+      if (inFile) fileLine++;
       if (re.test(line) && !line.startsWith("=== FILE: ")) {
-        const inFile = file && offset >= file.start && offset <= file.end;
         out.push({
           file: inFile ? file.path : undefined,
-          line: inFile ? countLines(h.text.slice(file.start, offset)) || 1 : i + 1,
+          line: inFile ? fileLine : i + 1,
           text: line,
           before: lines.slice(Math.max(0, i - context), i),
           after: lines.slice(i + 1, i + 1 + context),
@@ -235,6 +253,27 @@ export class HandleStore {
       offset += line.length + 1;
     }
     return out;
+  }
+
+  /** Matching paths only: stop at each file's first hit instead of allocating every match. */
+  matchingFiles(id: string, pattern: string, flags = ""): string[] {
+    const h = this.get(id);
+    const re = new RegExp(pattern, flags.replace(/[gy]/g, ""));
+    const paths: string[] = [];
+    for (const file of h.files) {
+      let start = file.start;
+      while (start <= file.end) {
+        const newline = h.text.indexOf("\n", start);
+        const end = newline < 0 ? file.end : Math.min(newline, file.end);
+        const line = h.text.slice(start, end);
+        if (!line.startsWith("=== FILE: ") && re.test(line)) {
+          paths.push(file.path);
+          break;
+        }
+        start = end + 1;
+      }
+    }
+    return paths;
   }
 
   private summary(h: Handle, skipped: string[]): HandleSummary {

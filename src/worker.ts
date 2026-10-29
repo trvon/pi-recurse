@@ -73,14 +73,15 @@ export class Worker {
   }
 
   async query(runtime: ModelRuntime, sessionModel: unknown, input: QueryInput, signal?: AbortSignal): Promise<QueryResult> {
+    signal?.throwIfAborted();
     const { model, name } = this.resolveModel(runtime, sessionModel, input.model);
     const prompt = this.buildPrompt(input);
     if (this.calls >= this.config.maxCalls) {
       throw new Error(`llm_query budget of ${this.config.maxCalls} calls is used up (maxCalls in pi-recurse.json)`);
     }
     this.calls++;
-    const message = await this.limiter.run(() =>
-      runtime.complete(
+    const message = await this.limiter.run(
+      () => runtime.complete(
         model,
         {
           systemPrompt: input.system,
@@ -88,6 +89,7 @@ export class Worker {
         },
         { signal, maxTokens: input.maxTokens },
       ),
+      signal,
     );
     if (message.stopReason === "error" || message.stopReason === "aborted") {
       throw new Error(`worker ${name} failed: ${message.errorMessage ?? message.stopReason}`);

@@ -44,6 +44,7 @@ export function childPrompt(req: Pick<ChildRequest, "task" | "handles">): string
 
 /** Run one task in a fresh in-process pi session with codemode and the RLM tools at `depth`. */
 export async function runChild(req: ChildRequest, deps: ChildDeps): Promise<ChildResult> {
+  req.signal?.throwIfAborted();
   const sdk = await import("@earendil-works/pi-coding-agent");
   const resourceLoader = new sdk.DefaultResourceLoader({
     cwd: req.cwd,
@@ -71,16 +72,33 @@ export async function runChild(req: ChildRequest, deps: ChildDeps): Promise<Chil
     excludeTools: CHILD_EXCLUDED_TOOLS,
   });
 
-  const abort = () => void session.abort();
-  req.signal?.addEventListener("abort", abort, { once: true });
-  const timer = setTimeout(abort, deps.config.childTimeoutMs);
+  let stopped: Error | undefined;
+  let abort = () => {};
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    const stop = (message: string) => {
+      stopped = new Error(message);
+      reject(stopped);
+      // Cancellation is already reported by the race; don't leak a rejected abort promise.
+      void session.abort().catch(() => {});
+    };
+    abort = () => stop("rlm_query aborted");
+    req.signal?.addEventListener("abort", abort, { once: true });
+    timer = setTimeout(() => stop(`rlm_query timed out after ${deps.config.childTimeoutMs}ms`), deps.config.childTimeoutMs);
+  });
   try {
-    await session.bindExtensions({});
-    await session.prompt(childPrompt(req));
-    if (req.signal?.aborted) throw new Error("rlm_query aborted");
-    const answer = session.getLastAssistantText()?.trim();
-    if (!answer) throw new Error("child finished without an answer (timeout or error)");
-    return { answer, depth: req.depth };
+    // The signal may have fired while the SDK was creating the session.
+    if (req.signal?.aborted) abort();
+    const work = async () => {
+      if (stopped) throw stopped;
+      await session.bindExtensions({});
+      if (stopped) throw stopped;
+      await session.prompt(childPrompt(req));
+      const answer = session.getLastAssistantText()?.trim();
+      if (!answer) throw new Error("child finished without an answer (timeout or error)");
+      return { answer, depth: req.depth };
+    };
+    return await Promise.race([work(), cancelled]);
   } finally {
     clearTimeout(timer);
     req.signal?.removeEventListener("abort", abort);

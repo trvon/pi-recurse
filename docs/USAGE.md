@@ -1,43 +1,69 @@
-# pi-recurse usage
+# Usage
 
-## When to use it
+Use the RLM tools for inputs too large to read directly: a repository, long logs, or a document set. For a single file or short question, use `read`.
 
-Use the RLM tools when the input is larger than what the model should read directly: a whole repository, long logs, many documents, or anything over a few tens of thousands of tokens. For a single file or a short question, plain `read` is simpler and cheaper.
+## Map and reduce
 
-## Patterns
+Load once. Split the input by file or line range, then ask the worker the same question about each part. Return the combined answers rather than the source text.
 
-**Map, then reduce.** Load once, split by file or line ranges, ask the same question of each piece with `llm_query_batched`, then aggregate in the script. Return only the aggregate.
+```js
+const input = await tools.rlm_load({ paths: ["src"] });
+const files = await tools.rlm_peek({ handle: input.handle, list_files: true });
+const { results } = await tools.llm_query_batched({
+  queries: files.files.map(({ path }) => ({
+    handle: input.handle,
+    file: path,
+    prompt: "List TODO comments. Quote each comment and name its file.",
+  })),
+});
+return results;
+```
 
-**Search first, then read.** `rlm_peek({ handle, pattern, files_only: true })` finds candidate locations cheaply; send only the matching files or ranges to `llm_query`.
+A batch accepts at most 256 queries. Split larger file lists into batches. Worker calls obey the shared `concurrency` and `maxCalls` settings.
 
-**Verify.** Ask the worker to quote the lines that support each answer, then check the quotes with `rlm_peek({ handle, pattern })` before trusting them.
+## Search before querying
 
-**Recurse when a piece needs its own loop.** `llm_query` is one question, one answer. When a part of the problem needs searching and several steps (for example "trace how this subsystem handles errors"), give it to `rlm_query` with that part's handle or slice. The sub-agent explores with the same tools and returns only its answer. It is far slower than `llm_query`, so use it for a few sub-tasks, not for a map over every file.
+Find candidate files with `rlm_peek({ handle, pattern, files_only: true })`. Send only those files or selected ranges to `llm_query`. Path-only searches stop at the first matching line in each file.
+
+Ask the worker to quote evidence. Check the quotes against the input with `rlm_peek` before relying on an answer.
+
+## Recursion
+
+Use `llm_query` for one model call. Use `rlm_query` when a sub-task needs its own search loop, such as tracing error handling across files. Each child runs an in-process Pi session with codemode and the RLM tools one level deeper.
 
 ```js
 const repo = await tools.rlm_load({ paths: ["src"] });
-const [net, store] = await Promise.all([
+const [network, storage] = await Promise.all([
   tools.rlm_query({ task: "How are network errors retried? Cite files.", handle: repo.handle }),
   tools.rlm_query({ task: "How is data persisted? Cite files.", handle: repo.handle }),
 ]);
-return { net: net.answer, store: store.answer };
+return { network: network.answer, storage: storage.answer };
 ```
 
-**Keep state across scripts.** Handles live for the pi process. Codemode's `store(key, value)` / `load(key)` keep JSON (such as handle ids and partial results) between `codemode` calls.
+Child sessions take more time and model calls than a single worker query. Use them for selected sub-tasks, not a query over every file.
 
 ## Handles
 
-Tools take `handle` as the id string from `rlm_load`. They also accept the whole `rlm_load` result, or text that contains the id. Leave `handle` out to use the most recently loaded handle. Internal slices made for `rlm_query` never become the default.
+Pass the ID from `rlm_load` as `handle`. Tools also accept the load result object or text containing exactly one known handle ID. Omit `handle` to use the most recently loaded user handle. Internal child slices do not replace that default.
+
+Handles last for the Pi process. Codemode's `store(key, value)` and `load(key)` keep JSON values, such as handle IDs and partial results, across scripts. After a restart, reload the input even if an old ID remains in codemode's store.
+
+A child slice uses a temporary handle, dropped when the call ends. Drop other handles with `rlm_handles({ drop: [id] })` when finished.
 
 ## Limits
 
-- Handles are in memory for the current pi process; reload after a restart.
-- Codemode scripts have 256 MB of VM memory: aggregate answers instead of collecting large text.
-- `llm_query` refuses prompts over `maxPromptChars`; split the context.
-- `maxCalls` stops runaway loops; the batched tool reports how many calls are left. The budget covers sub-agents too.
-- Sub-agents run in-process with no extensions, skills, context files or session file, and without `bash`, `edit` and `write`. Each is stopped after `childTimeoutMs`.
-- A slice passed to `rlm_query` becomes a temporary handle that is dropped when the call returns. Drop your own large handles with `rlm_handles({ drop })`.
+- Codemode has 256 MB of VM memory. Return summaries rather than accumulated source text.
+- `maxLoadBytes` limits each load of paths or literal text, not total handle-store memory.
+- `maxPromptChars` limits each worker prompt, including the context wrapper. Split larger inputs.
+- `maxCalls` counts worker queries across the tree, including queries made by children. It does not count child-agent model turns.
+- `concurrency` limits worker queries, not simultaneous child sessions.
+- `maxDepth` limits recursion. A child at that depth has no `rlm_query` tool.
+- Children load no other extensions, skills, context files or session file. They have no `bash`, `edit` or `write`. They are read-only, not a filesystem sandbox.
+- `childTimeoutMs` starts after SDK session creation. Task cancellation and timeouts reject the call rather than return a partial answer.
+- `max_chars` clips file/range peeks, not regex match/context strings. A long matching line can produce a large result. JavaScript regexes run synchronously; avoid patterns with excessive backtracking.
 
-## Choosing a worker
+## Worker choice
 
-Sub-queries are many and small, so prompt processing speed matters more than for chat. A local MoE model with fast prefill is a good worker; the session's own model works too (the default).
+The default is the current session model. Set `worker` in `pi-recurse.json` for a separate model; set `childModel` to choose a different model for recursive children. Per-call `model` overrides both. See the [configuration reference](../README.md#configuration) for precedence and file locations.
+
+Worker queries often use short prompts, so prompt-processing speed matters. A local MoE with fast prefill is one option. Measure your workload before choosing a model or raising concurrency.

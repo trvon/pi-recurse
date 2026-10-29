@@ -83,6 +83,26 @@ export function prepareQueryArguments(args: unknown): unknown {
   return a;
 }
 
+/** Main system prompt guideline, by how the tools are reached. */
+export function steeringGuideline(exposure: "codemode" | "direct"): string {
+  const t = exposure === "codemode" ? "tools." : "";
+  const via = exposure === "codemode" ? "write a codemode script that uses " : "use ";
+  return (
+    "For questions that span many files or a large codebase (tracing how a subsystem works, finding every use or caller, " +
+    `auditing, comparing modules), ${via}the RLM tools instead of reading files one by one: ${t}rlm_load holds the files ` +
+    `by handle, ${t}rlm_peek searches and reads slices, ${t}llm_query_batched asks a worker model about many files or ranges ` +
+    `at once, and ${t}rlm_query delegates a sub-question to a sub-agent. Return only the aggregated findings with file paths. ` +
+    "For one known file or a quick grep, use read or grep directly."
+  );
+}
+
+/** Script-side recipe, shown with rlm_load in codemode's tool listing. */
+export const LOAD_GUIDELINES = [
+  "Typical flow: const h = await tools.rlm_load({ paths: [\"src\"] }); search with tools.rlm_peek({ handle: h.handle, pattern, files_only: true }); " +
+    "then tools.llm_query_batched({ queries: files.map(f => ({ prompt, handle: h.handle, file: f })) }) and aggregate the answers in the script.",
+  "Keep script output small: return conclusions and file paths, not file contents.",
+];
+
 /** Names of the tools this package registers; used to restore their structured results. */
 export const TOOL_NAMES = new Set(["rlm_load", "rlm_peek", "llm_query", "llm_query_batched", "rlm_handles", "rlm_query"]);
 
@@ -133,6 +153,7 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     name: "rlm_load",
     label: "rlm_load",
     exposure,
+    promptGuidelines: LOAD_GUIDELINES,
     description:
       "Load large input (files, directories, globs, or literal text) into memory and return a handle plus size stats. The content is not returned: explore it with rlm_peek and hand slices to llm_query. Use for inputs too large to read directly.",
     parameters: Type.Object({
@@ -151,6 +172,9 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (params.text === undefined && !params.paths?.length) throw new Error("give paths or text");
+      if (params.text !== undefined && Buffer.byteLength(params.text) > config.maxLoadBytes) {
+        throw new Error(`input exceeds ${config.maxLoadBytes} bytes. Raise maxLoadBytes in pi-recurse.json.`);
+      }
       const s =
         params.text !== undefined
           ? store.loadText(params.text)
@@ -174,11 +198,11 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
       const h = store.get(id);
       const fileList = () => h.files.map((f) => ({ path: f.path, lines: f.lines, chars: f.end - f.start }));
       if (p.pattern !== undefined) {
-        const matches = store.grep(id, p.pattern, { flags: p.flags, context: p.context, maxMatches: p.files_only ? Number.MAX_SAFE_INTEGER : p.max_matches });
         if (p.files_only) {
-          const files = [...new Set(matches.map((m) => m.file).filter((f): f is string => f !== undefined))];
+          const files = store.matchingFiles(id, p.pattern, p.flags);
           return ok({ files }, files.length ? files.join("\n") : "no matching files");
         }
+        const matches = store.grep(id, p.pattern, { flags: p.flags, context: p.context, maxMatches: p.max_matches });
         return ok({ matches: matches as unknown as Json }, `${matches.length} matches`);
       }
       if (p.list_files) {
@@ -211,7 +235,10 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     outputSchema: QueryOutput,
     async execute(_id, p, signal, _onUpdate, ctx) {
       const r = await worker.query(ctx.modelRegistry as unknown as ModelRuntime, ctx.model, toInput(store, p), signal);
-      return ok({ text: r.text, model: r.model, input_tokens: r.inputTokens ?? null, output_tokens: r.outputTokens ?? null }, r.text);
+      const result: { [key: string]: Json } = { text: r.text, model: r.model };
+      if (r.inputTokens !== undefined) result.input_tokens = r.inputTokens;
+      if (r.outputTokens !== undefined) result.output_tokens = r.outputTokens;
+      return ok(result, r.text);
     },
   });
 
@@ -282,6 +309,10 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     prepareArguments: prepareQueryArguments as (args: unknown) => never,
     outputSchema: Type.Object({ answer: Type.String(), depth: Type.Number(), model: Type.String(), handle: Type.Optional(Type.String()) }),
     async execute(_id, p, signal, onUpdate, ctx) {
+      // Validate model selection before allocating a private slice.
+      const spec = p.model ?? (config.child ? `${config.child.provider}/${config.child.model}` : undefined);
+      // SAFETY: Pi's registry implements find/complete; model values originate from that registry.
+      const { model, name } = worker.resolveModel(ctx.modelRegistry as unknown as ModelRuntime, ctx.model, spec);
       const sliced = p.text !== undefined || Boolean(p.file || p.lines || p.chars);
       let handle: string | undefined;
       if (sliced) {
@@ -291,12 +322,10 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
         // an explicit reference must resolve; with none, give the child the latest handle if any
         handle = p.handle !== undefined ? store.resolve(p.handle) : store.latest();
       }
-      const handles = handle ? [summarize(store, handle)] : [];
-      const spec = p.model ?? (config.child ? `${config.child.provider}/${config.child.model}` : undefined);
-      const { model, name } = worker.resolveModel(ctx.modelRegistry as unknown as ModelRuntime, ctx.model, spec);
       const depth = deps.depth + 1;
-      onUpdate?.({ content: [{ type: "text", text: `sub-agent (depth ${depth}, ${name}) working` }], details: { depth } });
       try {
+        const handles = handle ? [summarize(store, handle)] : [];
+        onUpdate?.({ content: [{ type: "text", text: `sub-agent (depth ${depth}, ${name}) working` }], details: { depth } });
         const r = await deps.runChild({ cwd: ctx.cwd, task: p.task, handles, depth, model, signal });
         return ok({ answer: r.answer, depth, model: name, ...(handle ? { handle } : {}) }, r.answer);
       } finally {
