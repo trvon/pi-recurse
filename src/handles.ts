@@ -61,6 +61,37 @@ function isBinary(buf: Buffer): boolean {
 
 export class HandleStore {
   private readonly handles = new Map<string, Handle>();
+  /** Handles made internally (rlm_query slices); never picked as the default handle. */
+  private readonly internal = new Set<string>();
+
+  /**
+   * Resolve a handle reference from a model or script: an id, a result object carrying `handle`,
+   * or text that contains exactly one known id (as when a result rewriter turned the structured
+   * result into text). With no reference, the most recently loaded handle.
+   */
+  resolve(ref?: unknown): string {
+    const id = this.tryResolve(ref);
+    if (id) return id;
+    if (ref === undefined || ref === null || ref === "") throw new Error("no handle loaded: call rlm_load first");
+    throw new Error(`unknown handle ${JSON.stringify(ref).slice(0, 80)} (handles live for this pi process; load again)`);
+  }
+
+  /** Like resolve(), but undefined instead of an error when nothing matches. */
+  tryResolve(ref?: unknown): string | undefined {
+    if (ref && typeof ref === "object" && typeof (ref as { handle?: unknown }).handle === "string") ref = (ref as { handle: string }).handle;
+    if (ref === undefined || ref === null || ref === "") return this.latest();
+    if (typeof ref !== "string") return undefined;
+    if (this.handles.has(ref)) return ref;
+    const found = [...new Set(ref.match(/\b[0-9a-f]{8}\b/g) ?? [])].filter((id) => this.handles.has(id));
+    return found.length === 1 ? found[0] : undefined;
+  }
+
+  /** Most recently loaded handle that the user (not pi-recurse itself) created. */
+  latest(): string | undefined {
+    let last: string | undefined;
+    for (const id of this.handles.keys()) if (!this.internal.has(id)) last = id;
+    return last;
+  }
 
   get(id: string): Handle {
     const h = this.handles.get(id);
@@ -73,10 +104,11 @@ export class HandleStore {
   }
 
   drop(id: string): boolean {
+    this.internal.delete(id);
     return this.handles.delete(id);
   }
 
-  loadText(text: string, label = "text"): HandleSummary {
+  loadText(text: string, label = "text", options: { internal?: boolean } = {}): HandleSummary {
     const h: Handle = {
       id: randomUUID().slice(0, 8),
       label,
@@ -86,6 +118,7 @@ export class HandleStore {
       lines: countLines(text),
     };
     this.handles.set(h.id, h);
+    if (options.internal) this.internal.add(h.id);
     return this.summary(h, []);
   }
 

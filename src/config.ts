@@ -15,7 +15,17 @@ export interface RecurseConfig {
   maxLoadFiles: number;
   /** How the model reaches the tools: only from codemode scripts, or directly too. */
   exposure: ToolExposure;
+  /** Deepest rlm_query recursion: a child at this depth gets no rlm_query tool. */
+  maxDepth: number;
+  /** Model for rlm_query children as "provider/model". Unset: the worker, then the session model. */
+  child: { provider: string; model: string } | undefined;
+  /** Thinking level for rlm_query children. */
+  childThinking: "off" | "minimal" | "low" | "medium" | "high";
+  /** Wall-clock limit for one rlm_query child, in milliseconds. */
+  childTimeoutMs: number;
 }
+
+const THINKING = ["off", "minimal", "low", "medium", "high"] as const;
 
 function int(value: string | undefined, fallback: number, min = 1): number {
   const n = value === undefined ? Number.NaN : Number.parseInt(value, 10);
@@ -39,5 +49,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RecurseConfig 
     maxLoadBytes: int(env.PI_RECURSE_MAX_LOAD_BYTES, 64 * 1024 * 1024, 1024),
     maxLoadFiles: int(env.PI_RECURSE_MAX_LOAD_FILES, 5000),
     exposure,
+    maxDepth: int(env.PI_RECURSE_MAX_DEPTH, 2, 0),
+    child: parseModelSpec(env.PI_RECURSE_CHILD_MODEL),
+    childThinking: (THINKING as readonly string[]).includes(env.PI_RECURSE_CHILD_THINKING ?? "")
+      ? (env.PI_RECURSE_CHILD_THINKING as RecurseConfig["childThinking"])
+      : "low",
+    childTimeoutMs: int(env.PI_RECURSE_CHILD_TIMEOUT_MS, 600_000, 1000),
   };
 }

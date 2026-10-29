@@ -68,4 +68,26 @@ describe("HandleStore", () => {
     expect(s.drop(h.handle)).toBe(true);
     expect(s.list()).toEqual([]);
   });
+
+  it("resolves handle references flexibly", () => {
+    const store = new HandleStore();
+    expect(() => store.resolve()).toThrow(/rlm_load first/);
+    const a = store.loadText("a").handle;
+    const b = store.loadText("b").handle;
+    expect(store.resolve()).toBe(b);
+    expect(store.resolve(a)).toBe(a);
+    expect(store.resolve({ handle: a, files: 1 })).toBe(a);
+    // a result rewriter turned the structured result into text
+    expect(store.resolve(`Handle ${a}: 0 files, 1 lines, 1 chars.`)).toBe(a);
+    expect(() => store.resolve(`${a} and ${b}`)).toThrow(/unknown handle/);
+    expect(() => store.resolve("nope")).toThrow(/unknown handle/);
+  });
+
+  it("never picks an internal handle as the default", () => {
+    const store = new HandleStore();
+    const a = store.loadText("a").handle;
+    store.loadText("slice", "s", { internal: true });
+    expect(store.latest()).toBe(a);
+  });
 });
+
