@@ -54,9 +54,20 @@ export interface QueryResult {
 export class Worker {
   private calls = 0;
   private readonly limiter: Limiter;
+  private readonly childLimiters = new Map<number, Limiter>();
 
   constructor(private readonly config: RecurseConfig) {
     this.limiter = new Limiter(config.concurrency);
+  }
+
+  /** Limit active children per depth, not globally: a parent must be able to await a descendant. */
+  runChild<T>(depth: number, task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    let limiter = this.childLimiters.get(depth);
+    if (!limiter) {
+      limiter = new Limiter(this.config.childConcurrency);
+      this.childLimiters.set(depth, limiter);
+    }
+    return limiter.run(task, signal);
   }
 
   get callsUsed(): number {

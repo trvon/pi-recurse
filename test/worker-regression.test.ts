@@ -32,6 +32,26 @@ describe("worker failure and budget edges", () => {
     expect(worker.callsUsed).toBe(1);
   });
 
+  it("limits sibling children while permitting recursive descent and cancelling queued children", async () => {
+    const worker = new Worker({ ...DEFAULTS, childConcurrency: 1 });
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const calls: number[] = [];
+    const first = worker.runChild(1, async () => {
+      calls.push(1);
+      await worker.runChild(2, async () => { calls.push(2); });
+      await gate;
+    });
+    const controller = new AbortController();
+    const cancelled = expect(worker.runChild(1, async () => { calls.push(99); }, controller.signal)).rejects.toThrow("cancel");
+    const second = worker.runChild(1, async () => { calls.push(3); });
+    controller.abort(new Error("cancel"));
+    await cancelled;
+    expect(calls).toEqual([1, 2]);
+    release();
+    await Promise.all([first, second]);
+    expect(calls).toEqual([1, 2, 3]);
+  });
   it("rejects malformed overrides and reports missing model metadata", () => {
     const worker = new Worker(DEFAULTS);
     expect(() => worker.resolveModel(runtime(), model, "invalid")).toThrow(/provider\/model/);

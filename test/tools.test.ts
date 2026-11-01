@@ -27,7 +27,10 @@ function setup(env: RecurseConfigFile = { worker: "llamacpp/flint" }, depth = 0,
   const children: (ChildRequest & { seen: string })[] = [];
   const runChild = async (req: ChildRequest) => {
     // record what the child would see before the parent drops any slice handle
-    const seen = req.handles.map((h) => store.get(h.handle).text).join("|");
+    const seen = req.handles.length ? req.store.get(req.store.resolve()).text : "";
+    const childOwned = req.store.loadText("child allocation").handle;
+    expect(req.store.drop(req.handles[0]?.handle ?? "missing")).toBe(false);
+    expect(req.store.get(childOwned).text).toBe("child allocation");
     children.push({ ...req, seen });
     if (childError) throw childError;
     return { answer: `child@${req.depth}: ${req.task}`, depth: req.depth };
@@ -159,7 +162,7 @@ describe("registered tools", () => {
     const r = (await call("rlm_query", { task: "t", handle: load.handle, lines: { start: 2, count: 2 } })).structuredContent as { model: string; handle: string };
     expect(r.model).toBe("local/small");
     expect(children[0]?.seen).toBe("b\nc");
-    expect(r.handle).not.toBe(load.handle);
+    expect(r).not.toHaveProperty("handle");
     expect(store.list().map((h) => h.handle)).toEqual([load.handle]);
     await call("rlm_query", { task: "plain", text: "literal" });
     expect(children[1]?.seen).toBe("literal");

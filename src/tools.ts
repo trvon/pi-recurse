@@ -324,6 +324,7 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
       // Validate model selection before allocating a private slice.
       const spec = p.model ?? (config.child ? `${config.child.provider}/${config.child.model}` : undefined);
       const { model, name } = worker.resolveModel(workerRuntime(ctx.modelRegistry), ctx.model, spec);
+      return worker.runChild(deps.depth + 1, async () => {
       const sliced = p.text !== undefined || Boolean(p.file || p.lines || p.chars);
       let handle: string | undefined;
       if (sliced) {
@@ -334,15 +335,18 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
         handle = p.handle !== undefined ? store.resolve(p.handle) : store.latest();
       }
       const depth = deps.depth + 1;
+      const childStore = store.scope(handle ? [handle] : []);
       try {
         const handles = handle ? [summarize(store, handle)] : [];
         onUpdate?.({ content: [{ type: "text", text: `sub-agent (depth ${depth}, ${name}) working` }], details: { depth } });
-        const r = await deps.runChild({ cwd: ctx.cwd, task: p.task, handles, depth, model, signal });
-        return ok({ answer: r.answer, depth, model: name, ...(handle ? { handle } : {}) }, r.answer);
+        const r = await deps.runChild({ cwd: ctx.cwd, task: p.task, handles, store: childStore, depth, model, signal });
+        return ok({ answer: r.answer, depth, model: name, ...(!sliced && handle ? { handle } : {}) }, r.answer);
       } finally {
         // a slice made for this call is private to it
+        childStore.dispose();
         if (sliced && handle) store.drop(handle);
       }
+      }, signal);
     },
   });
 }

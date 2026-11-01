@@ -8,8 +8,8 @@ const roots: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("configuration edge cases", () => {
-  it("validates worker generation controls", () => {
-    const file = { workerMaxTokens: 2048, workerThinking: "low", workerTemperature: 0.2 };
+  it("validates worker controls and child cost fuses", () => {
+    const file = { workerMaxTokens: 2048, workerThinking: "low", workerTemperature: 0.2, childConcurrency: 2, childMaxTurns: 12 };
     const valid = resolveConfig([{ source: "p", data: file }]);
     expect(valid.warnings).toEqual([]);
     expect(describeConfig(valid.config)).toMatchObject(file);
@@ -18,9 +18,9 @@ describe("configuration edge cases", () => {
       expect(invalid.config.workerTemperature).toBe(0);
       expect(invalid.warnings).toHaveLength(1);
     }
-    const invalid = resolveConfig([{ source: "p", data: { workerMaxTokens: 0, workerThinking: "fast" } }]);
+    const invalid = resolveConfig([{ source: "p", data: { workerMaxTokens: 0, workerThinking: "fast", childConcurrency: 0, childMaxTurns: 1.5 } }]);
     expect(invalid.config).toEqual(DEFAULTS);
-    expect(invalid.warnings).toHaveLength(2);
+    expect(invalid.warnings).toHaveLength(4);
   });
   it("keeps the session model by default and preserves slash-containing model IDs", () => {
     expect(DEFAULTS.worker).toBeUndefined();
@@ -55,7 +55,7 @@ describe("configuration edge cases", () => {
       worker: null, childModel: null, concurrency: 2, maxCalls: 500, maxPromptChars: 200_000,
       maxLoadBytes: 67_108_864, maxLoadFiles: 5000, exposure: "direct", maxDepth: 2,
       childThinking: "low", childTimeoutMs: 600_000, steer: true,
-      workerMaxTokens: 512, workerThinking: "off", workerTemperature: 0,
+      workerMaxTokens: 512, workerThinking: "off", workerTemperature: 0, childConcurrency: 1, childMaxTurns: 8,
     });
   });
 

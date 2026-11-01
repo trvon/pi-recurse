@@ -34,6 +34,10 @@ export interface RecurseConfig {
   childThinking: ThinkingLevel;
   /** Wall-clock limit for one rlm_query child, in milliseconds. */
   childTimeoutMs: number;
+  /** Concurrent child sessions at each depth; separate levels avoid recursive deadlocks. */
+  childConcurrency: number;
+  /** Maximum assistant turns per child. */
+  childMaxTurns: number;
   /** Add a system prompt guideline that points the model at the RLM tools for large inputs. */
   steer: boolean;
 }
@@ -54,6 +58,8 @@ export interface RecurseConfigFile {
   childModel?: string | null;
   childThinking?: ThinkingLevel;
   childTimeoutMs?: number;
+  childConcurrency?: number;
+  childMaxTurns?: number;
   steer?: boolean;
 }
 
@@ -74,6 +80,8 @@ export const DEFAULTS: RecurseConfig = {
   child: undefined,
   childThinking: "low",
   childTimeoutMs: 600_000,
+  childConcurrency: 1,
+  childMaxTurns: 8,
   steer: true,
 };
 
@@ -83,6 +91,8 @@ const THINKING: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "
 const INTEGERS = {
   concurrency: 1,
   workerMaxTokens: 1,
+  childConcurrency: 1,
+  childMaxTurns: 1,
   maxCalls: 1,
   maxPromptChars: 1000,
   maxLoadBytes: 1024,
@@ -193,6 +203,8 @@ export function describeConfig(config: RecurseConfig): RecurseConfigFile {
     childModel: spec(config.child),
     childThinking: config.childThinking,
     childTimeoutMs: config.childTimeoutMs,
+    childConcurrency: config.childConcurrency,
+    childMaxTurns: config.childMaxTurns,
     steer: config.steer,
   };
 }

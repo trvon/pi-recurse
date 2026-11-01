@@ -20,9 +20,9 @@ export default function piRecurse(pi: ExtensionAPI): void {
   const { config, sources, warnings } = loadConfig();
   const store = new HandleStore();
   const worker = new Worker(config);
-  const register = (api: ExtensionAPI, depth: number): void =>
-    registerTools(api, { store, worker, config, depth, runChild: (req) => runChild(req, { store, worker, config, register }) });
-  register(pi, 0);
+  const register = (api: ExtensionAPI, depth: number, view: HandleStore): void =>
+    registerTools(api, { store: view, worker, config, depth, runChild: (req) => runChild(req, { store: req.store, worker, config, register }) });
+  register(pi, 0, store);
   restoreStructuredResults(pi);
 
   // Point the model at the RLM tools for large inputs; only when they are reachable this turn.

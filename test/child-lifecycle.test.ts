@@ -12,6 +12,7 @@ const sdk = vi.hoisted(() => {
     getLastAssistantText: vi.fn((): string | undefined => "  answer  "),
     abort: vi.fn(async () => {}),
     dispose: vi.fn(),
+    subscribe: vi.fn((_listener: (event: { type: string }) => void) => vi.fn()),
   };
   return {
     session,
@@ -37,23 +38,67 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession: sdk.create,
 }));
 
-const request = (): ChildRequest => ({ cwd: process.cwd(), task: "question", handles: [], depth: 1, model: { provider: "p", id: "m" } });
+const request = (): ChildRequest => ({ cwd: process.cwd(), task: "question", store: new HandleStore().scope([]), handles: [], depth: 1, model: { provider: "p", id: "m" } });
 const deps = (): ChildDeps => ({ store: new HandleStore(), worker: new Worker(DEFAULTS), config: { ...DEFAULTS, childTimeoutMs: 1000 }, register: vi.fn() });
 
 beforeEach(() => { vi.clearAllMocks(); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.resetAllMocks(); });
 
 describe("runChild lifecycle (mock SDK, no model requests)", () => {
+  it("limits assistant turns and unsubscribes", async () => {
+    const d = deps();
+    d.config.childMaxTurns = 2;
+    const unsubscribe = vi.fn();
+    sdk.session.subscribe.mockReturnValueOnce(unsubscribe);
+    sdk.session.prompt.mockImplementationOnce(async () => {
+      const listener = sdk.session.subscribe.mock.calls[0]?.[0];
+      for (let i = 0; i < 3; i++) listener?.({ type: "turn_start" });
+      listener?.({ type: "message_end" });
+    });
+    await expect(runChild(request(), d)).rejects.toThrow(/childMaxTurns/);
+    expect(sdk.session.abort).toHaveBeenCalledOnce();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(sdk.session.getLastAssistantText).not.toHaveBeenCalled();
+  });
+
+  it("includes resource initialization in the deadline", async () => {
+    vi.useFakeTimers();
+    let loaded = () => {};
+    sdk.reload.mockImplementationOnce(() => new Promise<void>((resolve) => { loaded = resolve; }));
+    const rejected = expect(runChild(request(), deps())).rejects.toThrow(/timed out/);
+    await vi.waitFor(() => expect(sdk.reload).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(1000);
+    await rejected;
+    loaded();
+    await Promise.resolve();
+    expect(sdk.create).not.toHaveBeenCalled();
+  });
+
+  it("disposes a session that finishes initialization after timeout", async () => {
+    vi.useFakeTimers();
+    let created = () => {};
+    sdk.create.mockImplementationOnce(() => new Promise((resolve) => { created = () => resolve({ session: sdk.session }); }));
+    const rejected = expect(runChild(request(), deps())).rejects.toThrow(/timed out/);
+    await vi.waitFor(() => expect(sdk.create).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(1000);
+    await rejected;
+    expect(sdk.session.dispose).not.toHaveBeenCalled();
+    created();
+    await Promise.resolve();
+    expect(sdk.session.dispose).toHaveBeenCalledOnce();
+    expect(sdk.session.prompt).not.toHaveBeenCalled();
+  });
   it("uses only explicit resources and disposes the completed session", async () => {
     const d = deps();
-    expect(await runChild(request(), d)).toEqual({ answer: "answer", depth: 1 });
+    const req = request();
+    expect(await runChild(req, d)).toEqual({ answer: "answer", depth: 1 });
     expect(sdk.loader).toHaveBeenCalledWith(expect.objectContaining({
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     }));
     const options = sdk.loader.mock.calls[0]?.[0] as { extensionFactories: ((pi: ExtensionAPI) => void)[] };
     const pi = {} as ExtensionAPI;
     options.extensionFactories[1]?.(pi);
-    expect(d.register).toHaveBeenCalledWith(pi, 1);
+    expect(d.register).toHaveBeenCalledWith(pi, 1, req.store);
     expect(sdk.create).toHaveBeenCalledWith(expect.objectContaining({ model: request().model, thinkingLevel: "low", excludeTools: ["bash", "edit", "write"] }));
     expect(sdk.overrides).toHaveBeenCalledWith({ defaultTools: ["+codemode"] });
     expect(sdk.settings).toHaveBeenCalledWith({ compaction: { enabled: false } });
@@ -85,7 +130,7 @@ describe("runChild lifecycle (mock SDK, no model requests)", () => {
     sdk.create.mockImplementationOnce(async () => { controller.abort(); return { session: sdk.session }; });
     await expect(runChild({ ...request(), signal: controller.signal }, deps())).rejects.toThrow(/aborted/);
     expect(sdk.session.prompt).not.toHaveBeenCalled();
-    expect(sdk.session.abort).toHaveBeenCalledOnce();
+    expect(sdk.session.abort).not.toHaveBeenCalled();
     expect(sdk.session.dispose).toHaveBeenCalledOnce();
   });
 

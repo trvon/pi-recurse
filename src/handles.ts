@@ -60,9 +60,47 @@ function isBinary(buf: Buffer): boolean {
 }
 
 export class HandleStore {
-  private readonly handles = new Map<string, Handle>();
-  /** Handles made internally (rlm_query slices); never picked as the default handle. */
-  private readonly internal = new Set<string>();
+  private readonly owned = new Set<string>();
+  private readonly slices = new Set<string>();
+  private disposed = false;
+
+  constructor(
+    private readonly handles = new Map<string, Handle>(),
+    /** Internal handles are hidden from root listings and default resolution. */
+    private readonly internal = new Set<string>(),
+    private readonly visible?: Set<string>,
+    private readonly assigned?: string,
+  ) {}
+
+  /** Borrow selected handles without copying text. Borrowed handles cannot be dropped. */
+  scope(ids: string[]): HandleStore {
+    if (this.disposed) throw new Error("handle scope is disposed");
+    // Snapshot references, not text: parent drops cannot invalidate an active child's input.
+    const borrowed = new Map(ids.map((id) => [id, this.get(id)]));
+    return new HandleStore(borrowed, new Set(), new Set(ids), ids[0]);
+  }
+
+  /** Drop only this view's allocations; late initialization cannot resurrect a disposed view. */
+  dispose(): void {
+    this.disposed = true;
+    this.handles.clear();
+    this.internal.clear();
+    this.owned.clear();
+    this.slices.clear();
+    this.visible?.clear();
+  }
+
+  private has(id: string): boolean {
+    return !this.disposed && this.handles.has(id) && (!this.visible || this.visible.has(id));
+  }
+
+  private retain(h: Handle, internal: boolean): void {
+    if (this.disposed) throw new Error("handle scope is disposed");
+    this.handles.set(h.id, h);
+    this.owned.add(h.id);
+    this.visible?.add(h.id);
+    if (internal || this.visible) this.internal.add(h.id);
+  }
 
   /**
    * Resolve a handle reference from a model or script: an id, a result object carrying `handle`,
@@ -81,30 +119,36 @@ export class HandleStore {
     if (ref && typeof ref === "object" && typeof (ref as { handle?: unknown }).handle === "string") ref = (ref as { handle: string }).handle;
     if (ref === undefined || ref === null || ref === "") return this.latest();
     if (typeof ref !== "string") return undefined;
-    if (this.handles.has(ref)) return ref;
-    const found = [...new Set(ref.match(/\b[0-9a-f]{8}\b/g) ?? [])].filter((id) => this.handles.has(id));
+    if (this.has(ref)) return ref;
+    const found = [...new Set(ref.match(/\b[0-9a-f]{8}\b/g) ?? [])].filter((id) => this.has(id));
     return found.length === 1 ? found[0] : undefined;
   }
 
   /** Most recently loaded handle that the user (not pi-recurse itself) created. */
   latest(): string | undefined {
     let last: string | undefined;
-    for (const id of this.handles.keys()) if (!this.internal.has(id)) last = id;
-    return last;
+    for (const id of this.handles.keys()) {
+      if (this.has(id) && (this.visible ? this.owned.has(id) && !this.slices.has(id) : !this.internal.has(id))) last = id;
+    }
+    return last ?? (this.assigned && this.has(this.assigned) ? this.assigned : undefined);
   }
 
   get(id: string): Handle {
-    const h = this.handles.get(id);
+    const h = this.has(id) ? this.handles.get(id) : undefined;
     if (!h) throw new Error(`unknown handle "${id}" (handles live for this pi process; load again)`);
     return h;
   }
 
   list(): HandleSummary[] {
-    return [...this.handles.values()].map((h) => this.summary(h, []));
+    return [...this.handles.values()].filter((h) => this.has(h.id) && (this.visible ? !this.slices.has(h.id) : !this.internal.has(h.id))).map((h) => this.summary(h, []));
   }
 
   drop(id: string): boolean {
+    if (!this.has(id) || (this.visible && !this.owned.has(id))) return false;
     this.internal.delete(id);
+    this.slices.delete(id);
+    this.owned.delete(id);
+    this.visible?.delete(id);
     return this.handles.delete(id);
   }
 
@@ -117,8 +161,8 @@ export class HandleStore {
       bytes: Buffer.byteLength(text),
       lines: countLines(text),
     };
-    this.handles.set(h.id, h);
-    if (options.internal) this.internal.add(h.id);
+    this.retain(h, options.internal ?? false);
+    if (options.internal) this.slices.add(h.id);
     return this.summary(h, []);
   }
 
@@ -180,7 +224,7 @@ export class HandleStore {
       bytes,
       lines: countLines(text),
     };
-    this.handles.set(h.id, h);
+    this.retain(h, false);
     return this.summary(h, skipped);
   }
 
