@@ -3,7 +3,7 @@ import { type Static, Type } from "typebox";
 import type { ChildRequest, ChildResult } from "./child.js";
 import type { RecurseConfig } from "./config.js";
 import type { HandleStore } from "./handles.js";
-import type { ModelRuntime, QueryInput, Worker } from "./worker.js";
+import { type QueryInput, type QueryResult, type Worker, workerRuntime } from "./worker.js";
 
 type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 
@@ -32,7 +32,42 @@ const QueryParams = Type.Object({
 });
 type QueryParamsT = Static<typeof QueryParams>;
 
-const QueryOutput = Type.Object({ text: Type.String(), model: Type.String(), input_tokens: Type.Optional(Type.Number()), output_tokens: Type.Optional(Type.Number()) });
+const QueryFields = {
+  text: Type.String(), model: Type.String(), input_tokens: Type.Optional(Type.Number()), output_tokens: Type.Optional(Type.Number()),
+  stop_reason: Type.String(), truncated: Type.Boolean(), empty: Type.Boolean(), duration_ms: Type.Number(), error: Type.Optional(Type.String()),
+};
+const QueryOutput = Type.Object(QueryFields);
+
+function queryResult(r: QueryResult): { [key: string]: Json } {
+  const result: { [key: string]: Json } = {
+    text: r.text, model: r.model, stop_reason: r.stopReason, truncated: r.truncated, empty: r.empty, duration_ms: r.durationMs,
+  };
+  if (r.inputTokens !== undefined) result.input_tokens = r.inputTokens;
+  if (r.outputTokens !== undefined) result.output_tokens = r.outputTokens;
+  if (r.empty && r.truncated) result.error = "Worker exhausted its output budget without an answer; reduce thinking or explicitly raise max_tokens. No automatic retry.";
+  return result;
+}
+
+const HandleSummaryOutput = Type.Object({
+  handle: Type.String(), label: Type.String(), chars: Type.Number(), bytes: Type.Number(), lines: Type.Number(), files: Type.Number(),
+});
+const FileOutput = Type.Object({ path: Type.String(), lines: Type.Number(), chars: Type.Number() });
+const PeekOutput = Type.Union([
+  Type.Object({ files: Type.Array(Type.String()) }),
+  Type.Object({ files: Type.Array(FileOutput) }),
+  Type.Object({ files: Type.Array(FileOutput), total_files: Type.Number(), chars: Type.Number(), hint: Type.String() }),
+  Type.Object({ text: Type.String(), chars: Type.Number() }),
+  Type.Object({ matches: Type.Array(Type.Object({ file: Type.Optional(Type.String()), line: Type.Number(), text: Type.String(), before: Type.Array(Type.String()), after: Type.Array(Type.String()) })) }),
+]);
+
+function exclusiveSelectors(p: Record<string, unknown>, keys: string[]): void {
+  if (keys.filter((key) => p[key] !== undefined && p[key] !== false).length > 1) throw new Error(`give only one of: ${keys.join(", ")}`);
+}
+
+function validateContext(p: { text?: string; handle?: string; file?: string; lines?: unknown; chars?: unknown }): void {
+  exclusiveSelectors(p, ["text", "file", "lines", "chars"]);
+  if (p.text !== undefined && p.handle !== undefined) throw new Error("text cannot be combined with handle");
+}
 
 const HANDLE_DOC = "Handle from rlm_load. Defaults to the most recently loaded handle.";
 
@@ -57,8 +92,9 @@ function normalizeHandle(a: Record<string, unknown>): Record<string, unknown> {
   return a;
 }
 
-export function prepareQueryItem(args: unknown): unknown {
-  return args && typeof args === "object" ? normalizeHandle({ ...(args as Record<string, unknown>) }) : args;
+/** Argument preparation precedes Pi's schema validation; invalid inputs must remain invalid. */
+export function prepareQueryItem(args: unknown): Record<string, unknown> {
+  return (args && typeof args === "object" ? normalizeHandle({ ...(args as Record<string, unknown>) }) : args) as Record<string, unknown>;
 }
 
 /** Map the names models tend to use for the search pattern onto `pattern`. */
@@ -73,8 +109,8 @@ export function preparePeekArguments(args: unknown): Static<typeof PeekParams> {
 }
 
 /** rlm_query takes `task`; models often pass `prompt` (as for llm_query) or `question`. */
-export function prepareQueryArguments(args: unknown): unknown {
-  if (!args || typeof args !== "object") return args;
+export function prepareQueryArguments(args: unknown): Record<string, unknown> {
+  if (!args || typeof args !== "object") return args as Record<string, unknown>;
   const a = normalizeHandle({ ...(args as Record<string, unknown>) });
   for (const alias of ["prompt", "question", "query"]) {
     if (a.task === undefined && typeof a[alias] === "string") a.task = a[alias];
@@ -88,19 +124,20 @@ export function steeringGuideline(exposure: "codemode" | "direct"): string {
   const t = exposure === "codemode" ? "tools." : "";
   const via = exposure === "codemode" ? "write a codemode script that uses " : "use ";
   return (
-    "For questions that span many files or a large codebase (tracing how a subsystem works, finding every use or caller, " +
-    `auditing, comparing modules), ${via}the RLM tools instead of reading files one by one: ${t}rlm_load holds the files ` +
-    `by handle, ${t}rlm_peek searches and reads slices, ${t}llm_query_batched asks a worker model about many files or ranges ` +
-    `at once, and ${t}rlm_query delegates a sub-question to a sub-agent. Return only the aggregated findings with file paths. ` +
-    "For one known file or a quick grep, use read or grep directly."
+    "For one known file, a small candidate set or a quick grep, use read or grep directly. For large input, " +
+    `${via}${t}rlm_load to hold text by handle and ${t}rlm_peek to select relevant slices. Prefer one combined ${t}llm_query ` +
+    `when the selected text fits the prompt budget; use ${t}llm_query_batched only for genuinely independent shards or oversized input, ` +
+    `not automatically per file. Reserve ${t}rlm_query for a branch needing its own multi-step search loop. ` +
+    "Check truncated/empty/error fields before using answers. Return only aggregated findings with file paths."
   );
 }
 
 /** Script-side recipe, shown with rlm_load in codemode's tool listing. */
 export const LOAD_GUIDELINES = [
-  "Typical flow: const h = await tools.rlm_load({ paths: [\"src\"] }); search with tools.rlm_peek({ handle: h.handle, pattern, files_only: true }); " +
-    "then tools.llm_query_batched({ queries: files.map(f => ({ prompt, handle: h.handle, file: f })) }) and aggregate the answers in the script.",
-  "Keep script output small: return conclusions and file paths, not file contents.",
+  'Typical flow: const h = await tools.rlm_load({ paths: ["src"] }); const { files } = await tools.rlm_peek({ handle: h.handle, pattern, files_only: true }); ' +
+    "select relevant text and prefer one combined llm_query if it fits. Only for independent shards or oversized input: " +
+    "await tools.llm_query_batched({ queries: files.map(file => ({ prompt, handle: h.handle, file })) }); check error/truncated/empty before aggregating.",
+  "Keep script output small. Use codemode store/load to retain JSON results across scripts; optionally rlm_load({ text: answer }) for searchable answer handles. Do not re-query already computed answers.",
 ];
 
 /** Names of the tools this package registers; used to restore their structured results. */
@@ -122,6 +159,7 @@ export function restoreStructuredResults(pi: ExtensionAPI): void {
 }
 
 export function contextFor(store: HandleStore, p: QueryParamsT): string | undefined {
+  validateContext(p);
   if (p.text !== undefined) return p.text;
   if (!p.handle && !p.file && !p.lines && !p.chars) return undefined;
   const id = store.resolve(p.handle);
@@ -171,6 +209,7 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
       skipped: Type.Array(Type.String()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      exclusiveSelectors(params, ["text", "paths"]);
       if (params.text === undefined && !params.paths?.length) throw new Error("give paths or text");
       if (params.text !== undefined && Buffer.byteLength(params.text) > config.maxLoadBytes) {
         throw new Error(`input exceeds ${config.maxLoadBytes} bytes. Raise maxLoadBytes in pi-recurse.json.`);
@@ -190,8 +229,11 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     description:
       "Look at part of a loaded handle without reading all of it. Give exactly one of: `pattern` (regex search, per line; add `files_only: true` for just the matching file paths), `file` (one loaded file), `lines`, `chars`, or `list_files: true`. With none, returns the file list and these options. `handle` defaults to the most recently loaded one. Keep results small; summarize big parts with llm_query.",
     parameters: PeekParams,
+    outputSchema: PeekOutput,
     prepareArguments: preparePeekArguments,
     async execute(_id, p) {
+      exclusiveSelectors(p, ["pattern", "file", "lines", "chars", "list_files"]);
+      if (p.files_only && p.pattern === undefined) throw new Error("files_only requires pattern");
       const cap = p.max_chars ?? 20000;
       const clip = (s: string) => (s.length > cap ? `${s.slice(0, cap)}\n... [${s.length - cap} more chars]` : s);
       const id = store.resolve(p.handle);
@@ -203,6 +245,7 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
           return ok({ files }, files.length ? files.join("\n") : "no matching files");
         }
         const matches = store.grep(id, p.pattern, { flags: p.flags, context: p.context, maxMatches: p.max_matches });
+        // SAFETY: grep matches contain only JSON fields; optional file is omitted for literal text.
         return ok({ matches: matches as unknown as Json }, `${matches.length} matches`);
       }
       if (p.list_files) {
@@ -229,16 +272,14 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     exposure,
     executionMode: "parallel",
     description:
-      "Ask the worker model one question, optionally about part of a loaded handle (whole handle, one file, a line or character range) or literal text. Returns only the answer. Use it to summarize, extract, or check pieces of large input; aggregate the answers in your script.",
+      "Ask the worker model one question, optionally about part of a loaded handle (whole handle, one file, a line or character range) or literal text. Returns text plus stop_reason, truncated, empty, duration_ms and usage. Check status before aggregating; an empty truncated result carries error, not a usable answer. Ask for NONE explicitly for no matches. No automatic retries.",
     parameters: QueryParams,
     prepareArguments: prepareQueryItem as (args: unknown) => QueryParamsT,
     outputSchema: QueryOutput,
     async execute(_id, p, signal, _onUpdate, ctx) {
-      const r = await worker.query(ctx.modelRegistry as unknown as ModelRuntime, ctx.model, toInput(store, p), signal);
-      const result: { [key: string]: Json } = { text: r.text, model: r.model };
-      if (r.inputTokens !== undefined) result.input_tokens = r.inputTokens;
-      if (r.outputTokens !== undefined) result.output_tokens = r.outputTokens;
-      return ok(result, r.text);
+      const r = await worker.query(workerRuntime(ctx.modelRegistry), ctx.model, toInput(store, p), signal);
+      const result = queryResult(r);
+      return ok(result, result.error ? String(result.error) : r.truncated ? `[truncated] ${r.text}` : r.empty ? "[empty completion]" : r.text);
     },
   });
 
@@ -248,15 +289,15 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     exposure,
     executionMode: "parallel",
     description:
-      "Run many llm_query sub-queries concurrently (bounded by the configured concurrency) and return the answers in order. Each item takes the same fields as llm_query. Failed items carry an error instead of text.",
+      "Run many llm_query sub-queries concurrently (bounded by the configured concurrency) and return the answers in order. Each item takes the same fields as llm_query. Provider failures carry error instead of text; empty truncated completions carry error plus status and usage. Inspect truncated/empty on every item.",
     parameters: Type.Object({ queries: Type.Array(QueryParams, { minItems: 1, maxItems: 256 }) }),
     prepareArguments: (args: unknown) => {
       const a = args as { queries?: unknown };
       return (Array.isArray(a?.queries) ? { ...a, queries: a.queries.map(prepareQueryItem) } : args) as { queries: QueryParamsT[] };
     },
-    outputSchema: Type.Object({ results: Type.Array(Type.Object({ text: Type.Optional(Type.String()), error: Type.Optional(Type.String()), model: Type.Optional(Type.String()) })) }),
+    outputSchema: Type.Object({ results: Type.Array(Type.Union([QueryOutput, Type.Object({ error: Type.String() })])) }),
     async execute(_id, p, signal, onUpdate, ctx) {
-      const runtime = ctx.modelRegistry as unknown as ModelRuntime;
+      const runtime = workerRuntime(ctx.modelRegistry);
       const total = p.queries.length;
       let done = 0;
       const results = await Promise.all(
@@ -264,7 +305,7 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
           let r: { [key: string]: Json };
           try {
             const a = await worker.query(runtime, ctx.model, toInput(store, q), signal);
-            r = { text: a.text, model: a.model };
+            r = queryResult(a);
           } catch (e) {
             r = { error: errorText(e) };
           }
@@ -283,7 +324,8 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     label: "rlm_handles",
     exposure,
     description: "List loaded handles with their sizes, or drop handles you no longer need to free memory.",
-    parameters: Type.Object({ drop: Type.Optional(Type.Array(Type.String(), { description: "Handles to forget." })) }),
+    parameters: Type.Object({ drop: Type.Optional(Type.Array(Type.String(), { description: "Owned handles to forget; a child cannot drop borrowed input." })) }),
+    outputSchema: Type.Object({ handles: Type.Array(HandleSummaryOutput), dropped: Type.Array(Type.String()) }),
     async execute(_id, p) {
       const dropped = (p.drop ?? []).filter((h) => store.drop(h));
       const handles = store.list().map(({ skipped: _s, ...h }) => h);
@@ -309,10 +351,11 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     prepareArguments: prepareQueryArguments as (args: unknown) => never,
     outputSchema: Type.Object({ answer: Type.String(), depth: Type.Number(), model: Type.String(), handle: Type.Optional(Type.String()) }),
     async execute(_id, p, signal, onUpdate, ctx) {
+      validateContext(p);
       // Validate model selection before allocating a private slice.
       const spec = p.model ?? (config.child ? `${config.child.provider}/${config.child.model}` : undefined);
-      // SAFETY: Pi's registry implements find/complete; model values originate from that registry.
-      const { model, name } = worker.resolveModel(ctx.modelRegistry as unknown as ModelRuntime, ctx.model, spec);
+      const { model, name } = worker.resolveModel(workerRuntime(ctx.modelRegistry), ctx.model, spec);
+      return worker.runChild(deps.depth + 1, async () => {
       const sliced = p.text !== undefined || Boolean(p.file || p.lines || p.chars);
       let handle: string | undefined;
       if (sliced) {
@@ -323,15 +366,18 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
         handle = p.handle !== undefined ? store.resolve(p.handle) : store.latest();
       }
       const depth = deps.depth + 1;
+      const childStore = store.scope(handle ? [handle] : []);
       try {
         const handles = handle ? [summarize(store, handle)] : [];
         onUpdate?.({ content: [{ type: "text", text: `sub-agent (depth ${depth}, ${name}) working` }], details: { depth } });
-        const r = await deps.runChild({ cwd: ctx.cwd, task: p.task, handles, depth, model, signal });
-        return ok({ answer: r.answer, depth, model: name, ...(handle ? { handle } : {}) }, r.answer);
+        const r = await deps.runChild({ cwd: ctx.cwd, task: p.task, handles, store: childStore, depth, model, signal });
+        return ok({ answer: r.answer, depth, model: name, ...(!sliced && handle ? { handle } : {}) }, r.answer);
       } finally {
         // a slice made for this call is private to it
+        childStore.dispose();
         if (sliced && handle) store.drop(handle);
       }
+      }, signal);
     },
   });
 }

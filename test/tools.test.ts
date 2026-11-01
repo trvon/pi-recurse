@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { ChildRequest } from "../src/child.js";
 import { type RecurseConfigFile, resolveConfig } from "../src/config.js";
 import { HandleStore } from "../src/handles.js";
-import { registerTools, restoreStructuredResults } from "../src/tools.js";
+import { LOAD_GUIDELINES, registerTools, restoreStructuredResults, steeringGuideline } from "../src/tools.js";
 import { Worker } from "../src/worker.js";
 
 const cfg = (file: RecurseConfigFile) => resolveConfig([{ source: "test", data: file }]).config;
@@ -16,7 +16,7 @@ interface Registered {
   exposure?: string;
   prepareArguments?: (args: unknown) => unknown;
   outputSchema?: TSchema;
-  execute: (id: string, params: unknown, signal: AbortSignal | undefined, onUpdate: ((u: { details: unknown }) => void) | undefined, ctx: unknown) => Promise<{ structuredContent?: unknown; content: { text: string }[] }>;
+  execute: (id: string, params: unknown, signal: AbortSignal | undefined, onUpdate: ((u: { details: unknown }) => void) | undefined, ctx: unknown) => Promise<{ structuredContent?: unknown; details?: unknown; content: { text: string }[] }>;
 }
 
 function setup(env: RecurseConfigFile = { worker: "llamacpp/flint" }, depth = 0, childError?: Error) {
@@ -27,7 +27,10 @@ function setup(env: RecurseConfigFile = { worker: "llamacpp/flint" }, depth = 0,
   const children: (ChildRequest & { seen: string })[] = [];
   const runChild = async (req: ChildRequest) => {
     // record what the child would see before the parent drops any slice handle
-    const seen = req.handles.map((h) => store.get(h.handle).text).join("|");
+    const seen = req.handles.length ? req.store.get(req.store.resolve()).text : "";
+    const childOwned = req.store.loadText("child allocation").handle;
+    expect(req.store.drop(req.handles[0]?.handle ?? "missing")).toBe(false);
+    expect(req.store.get(childOwned).text).toBe("child allocation");
     children.push({ ...req, seen });
     if (childError) throw childError;
     return { answer: `child@${req.depth}: ${req.task}`, depth: req.depth };
@@ -39,12 +42,17 @@ function setup(env: RecurseConfigFile = { worker: "llamacpp/flint" }, depth = 0,
     model: undefined,
     modelRegistry: {
       find: (provider: string, id: string) => ({ provider, id }),
-      async complete(_m: unknown, c: { messages: { content: string }[] }) {
+      streamSimple(_m: unknown, c: { messages: { content: string }[] }) {
+        return { result: async () => {
         const p = c.messages[0]?.content ?? "";
         prompts.push(p);
         if (p.includes("FAIL")) return { content: [], stopReason: "error", errorMessage: "worker down" };
+        if (p === "EMPTY_LENGTH") return { content: [], stopReason: "length", usage: { input: 1, output: 512 } };
+        if (p === "PARTIAL") return { content: [{ type: "text", text: "part" }], stopReason: "length" };
+        if (p === "EMPTY_STOP") return { content: [], stopReason: "stop" };
         if (p === "WITH_USAGE") return { content: [{ type: "text", text: "ok" }], usage: { input: 0, output: 12 } };
         return { content: [{ type: "text", text: `len=${p.length}` }] };
+        } };
       },
     },
   };
@@ -61,6 +69,38 @@ function setup(env: RecurseConfigFile = { worker: "llamacpp/flint" }, depth = 0,
 }
 
 describe("registered tools", () => {
+  it("exposes incomplete/empty status and usage consistently in single and batched queries", async () => {
+    const { call } = setup();
+    const single = await call("llm_query", { prompt: "EMPTY_LENGTH" });
+    expect(single.structuredContent).toMatchObject({ text: "", truncated: true, empty: true, stop_reason: "length", output_tokens: 512, error: expect.any(String), duration_ms: expect.any(Number) });
+    expect(single.content[0]?.text).toContain("without an answer");
+    expect((await call("llm_query", { prompt: "PARTIAL" })).content[0]?.text).toContain("[truncated]");
+    const empty = await call("llm_query", { prompt: "EMPTY_STOP" });
+    expect(empty.structuredContent).toMatchObject({ truncated: false, empty: true });
+    expect(empty.structuredContent).not.toHaveProperty("error");
+    expect(empty.content[0]?.text).toContain("empty completion");
+    const batch = (await call("llm_query_batched", { queries: [{ prompt: "EMPTY_LENGTH" }, { prompt: "WITH_USAGE" }] })).structuredContent;
+    expect(batch).toMatchObject({ results: [single.structuredContent && { error: expect.any(String), output_tokens: 512, stop_reason: "length" }, { input_tokens: 0, output_tokens: 12 }] });
+  });
+
+  it("rejects conflicting context/peek/load selectors", async () => {
+    const { call } = setup();
+    const { handle } = (await call("rlm_load", { text: "input" })).structuredContent as { handle: string };
+    await expect(call("rlm_load", { text: "", paths: ["src"] })).rejects.toThrow(/only one/);
+    await expect(call("rlm_peek", { pattern: "input", lines: { start: 1, count: 1 } })).rejects.toThrow(/only one/);
+    await expect(call("rlm_peek", { files_only: true })).rejects.toThrow(/requires pattern/);
+    await expect(call("llm_query", { prompt: "q", text: "", handle })).rejects.toThrow(/text cannot/);
+    await expect(call("llm_query", { prompt: "q", file: "f", chars: { start: 0, end: 2 } })).rejects.toThrow(/only one/);
+    await expect(call("rlm_query", { task: "q", text: "x", lines: { start: 1, count: 1 } })).rejects.toThrow(/only one/);
+  });
+
+  it("teaches selection and one combined query before batching with a structured peek recipe", () => {
+    expect(LOAD_GUIDELINES.join(" ")).toContain("const { files } = await tools.rlm_peek");
+    expect(LOAD_GUIDELINES.join(" ")).toContain("store/load");
+    const guidance = steeringGuideline("codemode");
+    expect(guidance.indexOf("combined tools.llm_query")).toBeLessThan(guidance.indexOf("tools.llm_query_batched"));
+    expect(guidance).toContain("not automatically per file");
+  });
   it("registers codemode-only tools by default, and rlm_query only below max depth", () => {
     const { tools } = setup();
     expect([...tools.keys()]).toEqual(["rlm_load", "rlm_peek", "llm_query", "llm_query_batched", "rlm_handles", "rlm_query"]);
@@ -140,7 +180,7 @@ describe("registered tools", () => {
     const r = (await call("rlm_query", { task: "t", handle: load.handle, lines: { start: 2, count: 2 } })).structuredContent as { model: string; handle: string };
     expect(r.model).toBe("local/small");
     expect(children[0]?.seen).toBe("b\nc");
-    expect(r.handle).not.toBe(load.handle);
+    expect(r).not.toHaveProperty("handle");
     expect(store.list().map((h) => h.handle)).toEqual([load.handle]);
     await call("rlm_query", { task: "plain", text: "literal" });
     expect(children[1]?.seen).toBe("literal");
@@ -233,6 +273,23 @@ describe("restoreStructuredResults", () => {
     expect(h({ toolName: "rlm_load", isError: false, content: [{ type: "text", text: "Handle ab12" }], details: { handle: "ab12" } })).toEqual({
       structuredContent: { handle: "ab12" },
     });
+  });
+
+  it("preserves real worker status and peek data after text-only rewriting", async () => {
+    const h = hook();
+    const { call, tools } = setup();
+    await call("rlm_load", { text: "context" });
+    for (const [toolName, args] of [
+      ["llm_query", { prompt: "EMPTY_LENGTH" }],
+      ["llm_query_batched", { queries: [{ prompt: "WITH_USAGE" }] }],
+      ["rlm_peek", { lines: { start: 1, count: 1 } }],
+      ["rlm_handles", {}],
+    ] as const) {
+      const result = await call(toolName, args);
+      const restored = h({ toolName, isError: false, content: [{ type: "text", text: "rewritten" }], details: result.details }) as { structuredContent: unknown };
+      expect(restored.structuredContent).toEqual(result.structuredContent);
+      expect(Check(tools.get(toolName)?.outputSchema as TSchema, restored.structuredContent)).toBe(true);
+    }
   });
 
   it("leaves intact results, errors and other tools alone", () => {
