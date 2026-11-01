@@ -65,7 +65,7 @@ describe("child handle views", () => {
     expect(() => root.get(own)).toThrow(/unknown/);
   });
 
-  it("tracks file loads in the view", async () => {
+  it("tracks file loads in the view and rejects ambiguous suffixes", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-recurse-scope-"));
     try {
       for (const dir of ["a", "b"]) {
@@ -76,6 +76,7 @@ describe("child handle views", () => {
       const child = root.scope([]);
       const { handle } = await child.loadFiles(["a/same.ts", "b/same.ts"], { cwd, maxBytes: 1024, maxFiles: 2 });
       expect(child.resolve()).toBe(handle);
+      expect(() => child.fileText(handle, "same.ts")).toThrow(/ambiguous/);
       expect(child.fileText(handle, join("b", "same.ts")).text).toBe("b");
       expect(child.fileText(handle, join("a", "same.ts")).text).toBe("a");
       expect(root.list()).toEqual([]);

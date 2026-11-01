@@ -48,6 +48,27 @@ function queryResult(r: QueryResult): { [key: string]: Json } {
   return result;
 }
 
+const HandleSummaryOutput = Type.Object({
+  handle: Type.String(), label: Type.String(), chars: Type.Number(), bytes: Type.Number(), lines: Type.Number(), files: Type.Number(),
+});
+const FileOutput = Type.Object({ path: Type.String(), lines: Type.Number(), chars: Type.Number() });
+const PeekOutput = Type.Union([
+  Type.Object({ files: Type.Array(Type.String()) }),
+  Type.Object({ files: Type.Array(FileOutput) }),
+  Type.Object({ files: Type.Array(FileOutput), total_files: Type.Number(), chars: Type.Number(), hint: Type.String() }),
+  Type.Object({ text: Type.String(), chars: Type.Number() }),
+  Type.Object({ matches: Type.Array(Type.Object({ file: Type.Optional(Type.String()), line: Type.Number(), text: Type.String(), before: Type.Array(Type.String()), after: Type.Array(Type.String()) })) }),
+]);
+
+function exclusiveSelectors(p: Record<string, unknown>, keys: string[]): void {
+  if (keys.filter((key) => p[key] !== undefined && p[key] !== false).length > 1) throw new Error(`give only one of: ${keys.join(", ")}`);
+}
+
+function validateContext(p: { text?: string; handle?: string; file?: string; lines?: unknown; chars?: unknown }): void {
+  exclusiveSelectors(p, ["text", "file", "lines", "chars"]);
+  if (p.text !== undefined && p.handle !== undefined) throw new Error("text cannot be combined with handle");
+}
+
 const HANDLE_DOC = "Handle from rlm_load. Defaults to the most recently loaded handle.";
 
 const PeekParams = Type.Object({
@@ -71,8 +92,9 @@ function normalizeHandle(a: Record<string, unknown>): Record<string, unknown> {
   return a;
 }
 
-export function prepareQueryItem(args: unknown): unknown {
-  return args && typeof args === "object" ? normalizeHandle({ ...(args as Record<string, unknown>) }) : args;
+/** Argument preparation precedes Pi's schema validation; invalid inputs must remain invalid. */
+export function prepareQueryItem(args: unknown): Record<string, unknown> {
+  return (args && typeof args === "object" ? normalizeHandle({ ...(args as Record<string, unknown>) }) : args) as Record<string, unknown>;
 }
 
 /** Map the names models tend to use for the search pattern onto `pattern`. */
@@ -87,8 +109,8 @@ export function preparePeekArguments(args: unknown): Static<typeof PeekParams> {
 }
 
 /** rlm_query takes `task`; models often pass `prompt` (as for llm_query) or `question`. */
-export function prepareQueryArguments(args: unknown): unknown {
-  if (!args || typeof args !== "object") return args;
+export function prepareQueryArguments(args: unknown): Record<string, unknown> {
+  if (!args || typeof args !== "object") return args as Record<string, unknown>;
   const a = normalizeHandle({ ...(args as Record<string, unknown>) });
   for (const alias of ["prompt", "question", "query"]) {
     if (a.task === undefined && typeof a[alias] === "string") a.task = a[alias];
@@ -102,19 +124,20 @@ export function steeringGuideline(exposure: "codemode" | "direct"): string {
   const t = exposure === "codemode" ? "tools." : "";
   const via = exposure === "codemode" ? "write a codemode script that uses " : "use ";
   return (
-    "For questions that span many files or a large codebase (tracing how a subsystem works, finding every use or caller, " +
-    `auditing, comparing modules), ${via}the RLM tools instead of reading files one by one: ${t}rlm_load holds the files ` +
-    `by handle, ${t}rlm_peek searches and reads slices, ${t}llm_query_batched asks a worker model about many files or ranges ` +
-    `at once, and ${t}rlm_query delegates a sub-question to a sub-agent. Return only the aggregated findings with file paths. ` +
-    "For one known file or a quick grep, use read or grep directly."
+    "For one known file, a small candidate set or a quick grep, use read or grep directly. For large input, " +
+    `${via}${t}rlm_load to hold text by handle and ${t}rlm_peek to select relevant slices. Prefer one combined ${t}llm_query ` +
+    `when the selected text fits the prompt budget; use ${t}llm_query_batched only for genuinely independent shards or oversized input, ` +
+    `not automatically per file. Reserve ${t}rlm_query for a branch needing its own multi-step search loop. ` +
+    "Check truncated/empty/error fields before using answers. Return only aggregated findings with file paths."
   );
 }
 
 /** Script-side recipe, shown with rlm_load in codemode's tool listing. */
 export const LOAD_GUIDELINES = [
-  "Typical flow: const h = await tools.rlm_load({ paths: [\"src\"] }); search with tools.rlm_peek({ handle: h.handle, pattern, files_only: true }); " +
-    "then tools.llm_query_batched({ queries: files.map(f => ({ prompt, handle: h.handle, file: f })) }) and aggregate the answers in the script.",
-  "Keep script output small: return conclusions and file paths, not file contents.",
+  'Typical flow: const h = await tools.rlm_load({ paths: ["src"] }); const { files } = await tools.rlm_peek({ handle: h.handle, pattern, files_only: true }); ' +
+    "select relevant text and prefer one combined llm_query if it fits. Only for independent shards or oversized input: " +
+    "await tools.llm_query_batched({ queries: files.map(file => ({ prompt, handle: h.handle, file })) }); check error/truncated/empty before aggregating.",
+  "Keep script output small. Use codemode store/load to retain JSON results across scripts; optionally rlm_load({ text: answer }) for searchable answer handles. Do not re-query already computed answers.",
 ];
 
 /** Names of the tools this package registers; used to restore their structured results. */
@@ -136,6 +159,7 @@ export function restoreStructuredResults(pi: ExtensionAPI): void {
 }
 
 export function contextFor(store: HandleStore, p: QueryParamsT): string | undefined {
+  validateContext(p);
   if (p.text !== undefined) return p.text;
   if (!p.handle && !p.file && !p.lines && !p.chars) return undefined;
   const id = store.resolve(p.handle);
@@ -185,6 +209,7 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
       skipped: Type.Array(Type.String()),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      exclusiveSelectors(params, ["text", "paths"]);
       if (params.text === undefined && !params.paths?.length) throw new Error("give paths or text");
       if (params.text !== undefined && Buffer.byteLength(params.text) > config.maxLoadBytes) {
         throw new Error(`input exceeds ${config.maxLoadBytes} bytes. Raise maxLoadBytes in pi-recurse.json.`);
@@ -204,8 +229,11 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     description:
       "Look at part of a loaded handle without reading all of it. Give exactly one of: `pattern` (regex search, per line; add `files_only: true` for just the matching file paths), `file` (one loaded file), `lines`, `chars`, or `list_files: true`. With none, returns the file list and these options. `handle` defaults to the most recently loaded one. Keep results small; summarize big parts with llm_query.",
     parameters: PeekParams,
+    outputSchema: PeekOutput,
     prepareArguments: preparePeekArguments,
     async execute(_id, p) {
+      exclusiveSelectors(p, ["pattern", "file", "lines", "chars", "list_files"]);
+      if (p.files_only && p.pattern === undefined) throw new Error("files_only requires pattern");
       const cap = p.max_chars ?? 20000;
       const clip = (s: string) => (s.length > cap ? `${s.slice(0, cap)}\n... [${s.length - cap} more chars]` : s);
       const id = store.resolve(p.handle);
@@ -217,6 +245,7 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
           return ok({ files }, files.length ? files.join("\n") : "no matching files");
         }
         const matches = store.grep(id, p.pattern, { flags: p.flags, context: p.context, maxMatches: p.max_matches });
+        // SAFETY: grep matches contain only JSON fields; optional file is omitted for literal text.
         return ok({ matches: matches as unknown as Json }, `${matches.length} matches`);
       }
       if (p.list_files) {
@@ -295,7 +324,8 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     label: "rlm_handles",
     exposure,
     description: "List loaded handles with their sizes, or drop handles you no longer need to free memory.",
-    parameters: Type.Object({ drop: Type.Optional(Type.Array(Type.String(), { description: "Handles to forget." })) }),
+    parameters: Type.Object({ drop: Type.Optional(Type.Array(Type.String(), { description: "Owned handles to forget; a child cannot drop borrowed input." })) }),
+    outputSchema: Type.Object({ handles: Type.Array(HandleSummaryOutput), dropped: Type.Array(Type.String()) }),
     async execute(_id, p) {
       const dropped = (p.drop ?? []).filter((h) => store.drop(h));
       const handles = store.list().map(({ skipped: _s, ...h }) => h);
@@ -321,6 +351,7 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     prepareArguments: prepareQueryArguments as (args: unknown) => never,
     outputSchema: Type.Object({ answer: Type.String(), depth: Type.Number(), model: Type.String(), handle: Type.Optional(Type.String()) }),
     async execute(_id, p, signal, onUpdate, ctx) {
+      validateContext(p);
       // Validate model selection before allocating a private slice.
       const spec = p.model ?? (config.child ? `${config.child.provider}/${config.child.model}` : undefined);
       const { model, name } = worker.resolveModel(workerRuntime(ctx.modelRegistry), ctx.model, spec);

@@ -231,7 +231,10 @@ export class HandleStore {
   /** Text of one loaded file, by exact or suffix path match. */
   fileText(id: string, path: string): { path: string; text: string } {
     const h = this.get(id);
-    const f = h.files.find((x) => x.path === path) ?? h.files.find((x) => x.path.endsWith(path));
+    const exact = h.files.find((x) => x.path === path);
+    const candidates = exact ? [exact] : h.files.filter((x) => x.path.endsWith(`/${path}`) || x.path.endsWith(`\\${path}`));
+    if (candidates.length > 1) throw new Error(`ambiguous file "${path}" in handle ${id}; use an exact path`);
+    const f = candidates[0];
     if (!f) throw new Error(`no file "${path}" in handle ${id}`);
     return { path: f.path, text: h.text.slice(f.start, f.end) };
   }

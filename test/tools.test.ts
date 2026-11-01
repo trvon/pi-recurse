@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { ChildRequest } from "../src/child.js";
 import { type RecurseConfigFile, resolveConfig } from "../src/config.js";
 import { HandleStore } from "../src/handles.js";
-import { registerTools, restoreStructuredResults } from "../src/tools.js";
+import { LOAD_GUIDELINES, registerTools, restoreStructuredResults, steeringGuideline } from "../src/tools.js";
 import { Worker } from "../src/worker.js";
 
 const cfg = (file: RecurseConfigFile) => resolveConfig([{ source: "test", data: file }]).config;
@@ -16,7 +16,7 @@ interface Registered {
   exposure?: string;
   prepareArguments?: (args: unknown) => unknown;
   outputSchema?: TSchema;
-  execute: (id: string, params: unknown, signal: AbortSignal | undefined, onUpdate: ((u: { details: unknown }) => void) | undefined, ctx: unknown) => Promise<{ structuredContent?: unknown; content: { text: string }[] }>;
+  execute: (id: string, params: unknown, signal: AbortSignal | undefined, onUpdate: ((u: { details: unknown }) => void) | undefined, ctx: unknown) => Promise<{ structuredContent?: unknown; details?: unknown; content: { text: string }[] }>;
 }
 
 function setup(env: RecurseConfigFile = { worker: "llamacpp/flint" }, depth = 0, childError?: Error) {
@@ -83,6 +83,24 @@ describe("registered tools", () => {
     expect(batch).toMatchObject({ results: [single.structuredContent && { error: expect.any(String), output_tokens: 512, stop_reason: "length" }, { input_tokens: 0, output_tokens: 12 }] });
   });
 
+  it("rejects conflicting context/peek/load selectors", async () => {
+    const { call } = setup();
+    const { handle } = (await call("rlm_load", { text: "input" })).structuredContent as { handle: string };
+    await expect(call("rlm_load", { text: "", paths: ["src"] })).rejects.toThrow(/only one/);
+    await expect(call("rlm_peek", { pattern: "input", lines: { start: 1, count: 1 } })).rejects.toThrow(/only one/);
+    await expect(call("rlm_peek", { files_only: true })).rejects.toThrow(/requires pattern/);
+    await expect(call("llm_query", { prompt: "q", text: "", handle })).rejects.toThrow(/text cannot/);
+    await expect(call("llm_query", { prompt: "q", file: "f", chars: { start: 0, end: 2 } })).rejects.toThrow(/only one/);
+    await expect(call("rlm_query", { task: "q", text: "x", lines: { start: 1, count: 1 } })).rejects.toThrow(/only one/);
+  });
+
+  it("teaches selection and one combined query before batching with a structured peek recipe", () => {
+    expect(LOAD_GUIDELINES.join(" ")).toContain("const { files } = await tools.rlm_peek");
+    expect(LOAD_GUIDELINES.join(" ")).toContain("store/load");
+    const guidance = steeringGuideline("codemode");
+    expect(guidance.indexOf("combined tools.llm_query")).toBeLessThan(guidance.indexOf("tools.llm_query_batched"));
+    expect(guidance).toContain("not automatically per file");
+  });
   it("registers codemode-only tools by default, and rlm_query only below max depth", () => {
     const { tools } = setup();
     expect([...tools.keys()]).toEqual(["rlm_load", "rlm_peek", "llm_query", "llm_query_batched", "rlm_handles", "rlm_query"]);
@@ -255,6 +273,23 @@ describe("restoreStructuredResults", () => {
     expect(h({ toolName: "rlm_load", isError: false, content: [{ type: "text", text: "Handle ab12" }], details: { handle: "ab12" } })).toEqual({
       structuredContent: { handle: "ab12" },
     });
+  });
+
+  it("preserves real worker status and peek data after text-only rewriting", async () => {
+    const h = hook();
+    const { call, tools } = setup();
+    await call("rlm_load", { text: "context" });
+    for (const [toolName, args] of [
+      ["llm_query", { prompt: "EMPTY_LENGTH" }],
+      ["llm_query_batched", { queries: [{ prompt: "WITH_USAGE" }] }],
+      ["rlm_peek", { lines: { start: 1, count: 1 } }],
+      ["rlm_handles", {}],
+    ] as const) {
+      const result = await call(toolName, args);
+      const restored = h({ toolName, isError: false, content: [{ type: "text", text: "rewritten" }], details: result.details }) as { structuredContent: unknown };
+      expect(restored.structuredContent).toEqual(result.structuredContent);
+      expect(Check(tools.get(toolName)?.outputSchema as TSchema, restored.structuredContent)).toBe(true);
+    }
   });
 
   it("leaves intact results, errors and other tools alone", () => {
