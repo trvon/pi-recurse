@@ -39,12 +39,17 @@ function setup(env: RecurseConfigFile = { worker: "llamacpp/flint" }, depth = 0,
     model: undefined,
     modelRegistry: {
       find: (provider: string, id: string) => ({ provider, id }),
-      async complete(_m: unknown, c: { messages: { content: string }[] }) {
+      streamSimple(_m: unknown, c: { messages: { content: string }[] }) {
+        return { result: async () => {
         const p = c.messages[0]?.content ?? "";
         prompts.push(p);
         if (p.includes("FAIL")) return { content: [], stopReason: "error", errorMessage: "worker down" };
+        if (p === "EMPTY_LENGTH") return { content: [], stopReason: "length", usage: { input: 1, output: 512 } };
+        if (p === "PARTIAL") return { content: [{ type: "text", text: "part" }], stopReason: "length" };
+        if (p === "EMPTY_STOP") return { content: [], stopReason: "stop" };
         if (p === "WITH_USAGE") return { content: [{ type: "text", text: "ok" }], usage: { input: 0, output: 12 } };
         return { content: [{ type: "text", text: `len=${p.length}` }] };
+        } };
       },
     },
   };
@@ -61,6 +66,20 @@ function setup(env: RecurseConfigFile = { worker: "llamacpp/flint" }, depth = 0,
 }
 
 describe("registered tools", () => {
+  it("exposes incomplete/empty status and usage consistently in single and batched queries", async () => {
+    const { call } = setup();
+    const single = await call("llm_query", { prompt: "EMPTY_LENGTH" });
+    expect(single.structuredContent).toMatchObject({ text: "", truncated: true, empty: true, stop_reason: "length", output_tokens: 512, error: expect.any(String), duration_ms: expect.any(Number) });
+    expect(single.content[0]?.text).toContain("without an answer");
+    expect((await call("llm_query", { prompt: "PARTIAL" })).content[0]?.text).toContain("[truncated]");
+    const empty = await call("llm_query", { prompt: "EMPTY_STOP" });
+    expect(empty.structuredContent).toMatchObject({ truncated: false, empty: true });
+    expect(empty.structuredContent).not.toHaveProperty("error");
+    expect(empty.content[0]?.text).toContain("empty completion");
+    const batch = (await call("llm_query_batched", { queries: [{ prompt: "EMPTY_LENGTH" }, { prompt: "WITH_USAGE" }] })).structuredContent;
+    expect(batch).toMatchObject({ results: [single.structuredContent && { error: expect.any(String), output_tokens: 512, stop_reason: "length" }, { input_tokens: 0, output_tokens: 12 }] });
+  });
+
   it("registers codemode-only tools by default, and rlm_query only below max depth", () => {
     const { tools } = setup();
     expect([...tools.keys()]).toEqual(["rlm_load", "rlm_peek", "llm_query", "llm_query_batched", "rlm_handles", "rlm_query"]);

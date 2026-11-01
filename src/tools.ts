@@ -3,7 +3,7 @@ import { type Static, Type } from "typebox";
 import type { ChildRequest, ChildResult } from "./child.js";
 import type { RecurseConfig } from "./config.js";
 import type { HandleStore } from "./handles.js";
-import type { ModelRuntime, QueryInput, Worker } from "./worker.js";
+import { type QueryInput, type QueryResult, type Worker, workerRuntime } from "./worker.js";
 
 type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 
@@ -32,7 +32,21 @@ const QueryParams = Type.Object({
 });
 type QueryParamsT = Static<typeof QueryParams>;
 
-const QueryOutput = Type.Object({ text: Type.String(), model: Type.String(), input_tokens: Type.Optional(Type.Number()), output_tokens: Type.Optional(Type.Number()) });
+const QueryFields = {
+  text: Type.String(), model: Type.String(), input_tokens: Type.Optional(Type.Number()), output_tokens: Type.Optional(Type.Number()),
+  stop_reason: Type.String(), truncated: Type.Boolean(), empty: Type.Boolean(), duration_ms: Type.Number(), error: Type.Optional(Type.String()),
+};
+const QueryOutput = Type.Object(QueryFields);
+
+function queryResult(r: QueryResult): { [key: string]: Json } {
+  const result: { [key: string]: Json } = {
+    text: r.text, model: r.model, stop_reason: r.stopReason, truncated: r.truncated, empty: r.empty, duration_ms: r.durationMs,
+  };
+  if (r.inputTokens !== undefined) result.input_tokens = r.inputTokens;
+  if (r.outputTokens !== undefined) result.output_tokens = r.outputTokens;
+  if (r.empty && r.truncated) result.error = "Worker exhausted its output budget without an answer; reduce thinking or explicitly raise max_tokens. No automatic retry.";
+  return result;
+}
 
 const HANDLE_DOC = "Handle from rlm_load. Defaults to the most recently loaded handle.";
 
@@ -229,16 +243,14 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     exposure,
     executionMode: "parallel",
     description:
-      "Ask the worker model one question, optionally about part of a loaded handle (whole handle, one file, a line or character range) or literal text. Returns only the answer. Use it to summarize, extract, or check pieces of large input; aggregate the answers in your script.",
+      "Ask the worker model one question, optionally about part of a loaded handle (whole handle, one file, a line or character range) or literal text. Returns text plus stop_reason, truncated, empty, duration_ms and usage. Check status before aggregating; an empty truncated result carries error, not a usable answer. Ask for NONE explicitly for no matches. No automatic retries.",
     parameters: QueryParams,
     prepareArguments: prepareQueryItem as (args: unknown) => QueryParamsT,
     outputSchema: QueryOutput,
     async execute(_id, p, signal, _onUpdate, ctx) {
-      const r = await worker.query(ctx.modelRegistry as unknown as ModelRuntime, ctx.model, toInput(store, p), signal);
-      const result: { [key: string]: Json } = { text: r.text, model: r.model };
-      if (r.inputTokens !== undefined) result.input_tokens = r.inputTokens;
-      if (r.outputTokens !== undefined) result.output_tokens = r.outputTokens;
-      return ok(result, r.text);
+      const r = await worker.query(workerRuntime(ctx.modelRegistry), ctx.model, toInput(store, p), signal);
+      const result = queryResult(r);
+      return ok(result, result.error ? String(result.error) : r.truncated ? `[truncated] ${r.text}` : r.empty ? "[empty completion]" : r.text);
     },
   });
 
@@ -248,15 +260,15 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     exposure,
     executionMode: "parallel",
     description:
-      "Run many llm_query sub-queries concurrently (bounded by the configured concurrency) and return the answers in order. Each item takes the same fields as llm_query. Failed items carry an error instead of text.",
+      "Run many llm_query sub-queries concurrently (bounded by the configured concurrency) and return the answers in order. Each item takes the same fields as llm_query. Provider failures carry error instead of text; empty truncated completions carry error plus status and usage. Inspect truncated/empty on every item.",
     parameters: Type.Object({ queries: Type.Array(QueryParams, { minItems: 1, maxItems: 256 }) }),
     prepareArguments: (args: unknown) => {
       const a = args as { queries?: unknown };
       return (Array.isArray(a?.queries) ? { ...a, queries: a.queries.map(prepareQueryItem) } : args) as { queries: QueryParamsT[] };
     },
-    outputSchema: Type.Object({ results: Type.Array(Type.Object({ text: Type.Optional(Type.String()), error: Type.Optional(Type.String()), model: Type.Optional(Type.String()) })) }),
+    outputSchema: Type.Object({ results: Type.Array(Type.Union([QueryOutput, Type.Object({ error: Type.String() })])) }),
     async execute(_id, p, signal, onUpdate, ctx) {
-      const runtime = ctx.modelRegistry as unknown as ModelRuntime;
+      const runtime = workerRuntime(ctx.modelRegistry);
       const total = p.queries.length;
       let done = 0;
       const results = await Promise.all(
@@ -264,7 +276,7 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
           let r: { [key: string]: Json };
           try {
             const a = await worker.query(runtime, ctx.model, toInput(store, q), signal);
-            r = { text: a.text, model: a.model };
+            r = queryResult(a);
           } catch (e) {
             r = { error: errorText(e) };
           }
@@ -311,8 +323,7 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     async execute(_id, p, signal, onUpdate, ctx) {
       // Validate model selection before allocating a private slice.
       const spec = p.model ?? (config.child ? `${config.child.provider}/${config.child.model}` : undefined);
-      // SAFETY: Pi's registry implements find/complete; model values originate from that registry.
-      const { model, name } = worker.resolveModel(ctx.modelRegistry as unknown as ModelRuntime, ctx.model, spec);
+      const { model, name } = worker.resolveModel(workerRuntime(ctx.modelRegistry), ctx.model, spec);
       const sliced = p.text !== undefined || Boolean(p.file || p.lines || p.chars);
       let handle: string | undefined;
       if (sliced) {

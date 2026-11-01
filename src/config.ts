@@ -8,8 +8,14 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
 export interface RecurseConfig {
   /** Worker model as "provider/model". Unset: the session's current model. */
   worker: { provider: string; model: string } | undefined;
-  /** Sub-queries run at once. Match the worker server's slots (llama-server -np). */
+  /** Maximum concurrent worker calls; tune against measured server throughput. */
   concurrency: number;
+  /** Output budget per worker call, including reasoning tokens. */
+  workerMaxTokens: number;
+  /** Provider-neutral reasoning control (where supported by the model). */
+  workerThinking: ThinkingLevel;
+  /** Sampling temperature for extraction workers. */
+  workerTemperature: number;
   /** Total llm_query calls allowed per process, as a runaway guard. */
   maxCalls: number;
   /** Largest prompt (context + question) sent in one sub-query, in characters. */
@@ -36,6 +42,9 @@ export interface RecurseConfig {
 export interface RecurseConfigFile {
   worker?: string | null;
   concurrency?: number;
+  workerMaxTokens?: number;
+  workerThinking?: ThinkingLevel;
+  workerTemperature?: number;
   maxCalls?: number;
   maxPromptChars?: number;
   maxLoadBytes?: number;
@@ -53,6 +62,9 @@ export const CONFIG_FILE = "pi-recurse.json";
 export const DEFAULTS: RecurseConfig = {
   worker: undefined,
   concurrency: 2,
+  workerMaxTokens: 512,
+  workerThinking: "off",
+  workerTemperature: 0,
   maxCalls: 500,
   maxPromptChars: 200_000,
   maxLoadBytes: 64 * 1024 * 1024,
@@ -70,6 +82,7 @@ const THINKING: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "
 /** Integer keys with their minimum allowed value. */
 const INTEGERS = {
   concurrency: 1,
+  workerMaxTokens: 1,
   maxCalls: 1,
   maxPromptChars: 1000,
   maxLoadBytes: 1024,
@@ -124,9 +137,12 @@ export function resolveConfig(layers: { source: string; data: unknown }[]): Load
       } else if (key === "steer") {
         if (typeof value === "boolean") config.steer = value;
         else bad(key, "must be true or false");
-      } else if (key === "childThinking") {
-        if (typeof value === "string" && (THINKING as readonly string[]).includes(value)) config.childThinking = value as ThinkingLevel;
+      } else if (key === "childThinking" || key === "workerThinking") {
+        if (typeof value === "string" && (THINKING as readonly string[]).includes(value)) config[key] = value as ThinkingLevel;
         else bad(key, `must be one of ${THINKING.join(", ")}`);
+      } else if (key === "workerTemperature") {
+        if (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 2) config.workerTemperature = value;
+        else bad(key, "must be a finite number between 0 and 2");
       } else if (key !== "$schema") {
         warnings.push(`${source}: unknown key "${key}"; ignored`);
       }
@@ -165,6 +181,9 @@ export function describeConfig(config: RecurseConfig): RecurseConfigFile {
   return {
     worker: spec(config.worker),
     concurrency: config.concurrency,
+    workerMaxTokens: config.workerMaxTokens,
+    workerThinking: config.workerThinking,
+    workerTemperature: config.workerTemperature,
     maxCalls: config.maxCalls,
     maxPromptChars: config.maxPromptChars,
     maxLoadBytes: config.maxLoadBytes,

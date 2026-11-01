@@ -11,7 +11,7 @@ function runtime(reply: (prompt: string) => WorkerMessage | Promise<WorkerMessag
   const seen: { model: unknown; prompt: string; system?: string }[] = [];
   const rt: ModelRuntime = {
     find: (provider, id) => (known.includes(`${provider}/${id}`) ? { provider, id } : undefined),
-    async complete(model, context) {
+    async completeSimple(model, context) {
       const c = context as { systemPrompt?: string; messages: { content: string }[] };
       const prompt = c.messages[0]?.content ?? "";
       seen.push({ model, prompt, system: c.systemPrompt });
@@ -73,7 +73,7 @@ describe("Worker", () => {
     const w = new Worker(cfg({ worker: "llamacpp/flint" }));
     const { rt, seen } = runtime(() => text("42"));
     const r = await w.query(rt, { provider: "x", id: "session" }, { prompt: "answer?", context: "data", system: "be brief" });
-    expect(r).toEqual({ text: "42", model: "llamacpp/flint", inputTokens: 10, outputTokens: 2 });
+    expect(r).toMatchObject({ text: "42", model: "llamacpp/flint", inputTokens: 10, outputTokens: 2, stopReason: "unknown", empty: false, truncated: false, durationMs: expect.any(Number) });
     expect(seen[0]?.prompt).toBe("<context>\ndata\n</context>\n\nanswer?");
     expect(seen[0]?.system).toBe("be brief");
     expect(w.callsUsed).toBe(1);

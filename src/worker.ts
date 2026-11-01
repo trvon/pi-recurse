@@ -1,11 +1,25 @@
-import type { RecurseConfig } from "./config.js";
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import type { RecurseConfig, ThinkingLevel } from "./config.js";
 import { parseModelSpec } from "./config.js";
 import { Limiter } from "./limiter.js";
 
 /** The parts of pi's model registry this extension uses. */
 export interface ModelRuntime {
   find(provider: string, modelId: string): unknown | undefined;
-  complete(model: unknown, context: unknown, options?: { signal?: AbortSignal; maxTokens?: number }): Promise<WorkerMessage>;
+  completeSimple(model: unknown, context: unknown, options?: { signal?: AbortSignal; maxTokens?: number; reasoning?: Exclude<ThinkingLevel, "off">; temperature?: number }): Promise<WorkerMessage>;
+}
+
+/** Adapt Pi's extension facade, which exposes streamSimple but not completeSimple. */
+export function workerRuntime(registry: Pick<ModelRegistry, "find" | "streamSimple">): ModelRuntime {
+  return {
+    find: (provider, id) => registry.find(provider, id),
+    completeSimple: (model, context, options) => registry.streamSimple(
+      // Models come from this registry; Worker builds a single-user-message Context.
+      model as Parameters<ModelRegistry["streamSimple"]>[0],
+      context as Parameters<ModelRegistry["streamSimple"]>[1],
+      options,
+    ).result(),
+  };
 }
 
 /** The parts of an assistant message this extension reads. */
@@ -30,6 +44,11 @@ export interface QueryResult {
   model: string;
   inputTokens?: number;
   outputTokens?: number;
+  stopReason: string;
+  truncated: boolean;
+  empty: boolean;
+  /** Wall time including limiter queueing. */
+  durationMs: number;
 }
 
 export class Worker {
@@ -73,24 +92,31 @@ export class Worker {
   }
 
   async query(runtime: ModelRuntime, sessionModel: unknown, input: QueryInput, signal?: AbortSignal): Promise<QueryResult> {
+    const started = performance.now();
     signal?.throwIfAborted();
     const { model, name } = this.resolveModel(runtime, sessionModel, input.model);
     const prompt = this.buildPrompt(input);
-    if (this.calls >= this.config.maxCalls) {
-      throw new Error(`llm_query budget of ${this.config.maxCalls} calls is used up (maxCalls in pi-recurse.json)`);
-    }
-    this.calls++;
-    const message = await this.limiter.run(
-      () => runtime.complete(
+    const message = await this.limiter.run(() => {
+      if (this.calls >= this.config.maxCalls) {
+        throw new Error(`llm_query budget of ${this.config.maxCalls} calls is used up (maxCalls in pi-recurse.json)`);
+      }
+      this.calls++;
+      // completeSimple maps provider-neutral reasoning to the model's native options.
+      // "off" is represented by an absent reasoning level in Pi's simple API.
+      return runtime.completeSimple(
         model,
         {
           systemPrompt: input.system,
           messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
         },
-        { signal, maxTokens: input.maxTokens },
-      ),
-      signal,
-    );
+        {
+          signal,
+          maxTokens: input.maxTokens ?? this.config.workerMaxTokens,
+          reasoning: this.config.workerThinking === "off" ? undefined : this.config.workerThinking,
+          temperature: this.config.workerTemperature,
+        },
+      );
+    }, signal);
     if (message.stopReason === "error" || message.stopReason === "aborted") {
       throw new Error(`worker ${name} failed: ${message.errorMessage ?? message.stopReason}`);
     }
@@ -98,6 +124,10 @@ export class Worker {
       .filter((c) => c.type === "text")
       .map((c) => c.text ?? "")
       .join("");
-    return { text, model: name, inputTokens: message.usage?.input, outputTokens: message.usage?.output };
+    return {
+      text, model: name, inputTokens: message.usage?.input, outputTokens: message.usage?.output,
+      stopReason: message.stopReason ?? "unknown", truncated: message.stopReason === "length",
+      empty: text.trim().length === 0, durationMs: Math.round(performance.now() - started),
+    };
   }
 }
