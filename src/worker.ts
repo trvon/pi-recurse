@@ -148,7 +148,7 @@ export class Worker {
       return runtime.completeSimple(
         model,
         {
-          systemPrompt: input.system,
+          systemPrompt: input.system ?? this.config.workerSystemPrompt,
           messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
         },
         {

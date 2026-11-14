@@ -63,6 +63,7 @@ Every key is optional.
 |---|---|---|
 | `worker` | session model | Worker as `"provider/model"`. |
 | `preferLocalSessionModel` | `true` | Use a locally served session model instead of `worker` / `childModel`. Local means a base URL on loopback, a private or link-local address, or a `.local` name. Per-call `model` always wins. |
+| `workerSystemPrompt` | grounded-answer prompt | System prompt for worker calls without their own `system`: answer only from the context, quote evidence with file paths, reply `NONE` when absent. `null` sends none. |
 | `concurrency` | `2` | Concurrent worker queries across the recursion tree; not child sessions. |
 | `workerMaxTokens` | `512` | Output-token cap per worker call, including reasoning. Per-call `max_tokens` wins. |
 | `workerThinking` | `"off"` | Worker reasoning: `off`, `minimal`, `low`, `medium`, `high`; mapped by Pi where the model/provider supports it. |
