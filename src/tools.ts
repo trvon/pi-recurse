@@ -352,9 +352,9 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     outputSchema: Type.Object({ answer: Type.String(), depth: Type.Number(), model: Type.String(), handle: Type.Optional(Type.String()) }),
     async execute(_id, p, signal, onUpdate, ctx) {
       validateContext(p);
-      // Validate model selection before allocating a private slice.
-      const spec = p.model ?? (config.child ? `${config.child.provider}/${config.child.model}` : undefined);
-      const { model, name } = worker.resolveModel(workerRuntime(ctx.modelRegistry), ctx.model, spec);
+      // Validate model selection before allocating a private slice: the call's model, else the
+      // child model, else the worker (a local session model wins over both, see resolveModel).
+      const { model, name } = worker.resolveModel(workerRuntime(ctx.modelRegistry), ctx.model, p.model, config.child ?? config.worker);
       return worker.runChild(deps.depth + 1, async () => {
       const sliced = p.text !== undefined || Boolean(p.file || p.lines || p.chars);
       let handle: string | undefined;

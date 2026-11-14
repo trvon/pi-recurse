@@ -9,7 +9,7 @@ export { CHILD_EXCLUDED_TOOLS, childPrompt, runChild } from "./child.js";
 export { CONFIG_FILE, configPaths, DEFAULTS, describeConfig, loadConfig, parseModelSpec, resolveConfig } from "./config.js";
 export { HandleStore } from "./handles.js";
 export { registerTools, restoreStructuredResults, steeringGuideline } from "./tools.js";
-export { Worker } from "./worker.js";
+export { isLocalModel, Worker } from "./worker.js";
 
 /**
  * Pi extension entry point: registers the RLM tools (codemode-only by default).

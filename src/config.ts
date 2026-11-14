@@ -8,6 +8,12 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
 export interface RecurseConfig {
   /** Worker model as "provider/model". Unset: the session's current model. */
   worker: { provider: string; model: string } | undefined;
+  /**
+   * When the session model is served from this machine or the local network (llama.cpp, Ollama,
+   * LM Studio, vLLM...), use it for workers and children instead of `worker` / `childModel`: it is
+   * already loaded, while a different local model would have to be loaded next to it.
+   */
+  preferLocalSessionModel: boolean;
   /** Maximum concurrent worker calls; tune against measured server throughput. */
   concurrency: number;
   /** Output budget per worker call, including reasoning tokens. */
@@ -45,6 +51,7 @@ export interface RecurseConfig {
 /** The JSON file format: every key optional, models as "provider/model" strings. */
 export interface RecurseConfigFile {
   worker?: string | null;
+  preferLocalSessionModel?: boolean;
   concurrency?: number;
   workerMaxTokens?: number;
   workerThinking?: ThinkingLevel;
@@ -67,6 +74,7 @@ export const CONFIG_FILE = "pi-recurse.json";
 
 export const DEFAULTS: RecurseConfig = {
   worker: undefined,
+  preferLocalSessionModel: true,
   concurrency: 2,
   workerMaxTokens: 512,
   workerThinking: "off",
@@ -144,8 +152,8 @@ export function resolveConfig(layers: { source: string; data: unknown }[]): Load
       } else if (key === "exposure") {
         if (value === "codemode" || value === "direct") config.exposure = value;
         else bad(key, 'must be "codemode" or "direct"');
-      } else if (key === "steer") {
-        if (typeof value === "boolean") config.steer = value;
+      } else if (key === "steer" || key === "preferLocalSessionModel") {
+        if (typeof value === "boolean") config[key] = value;
         else bad(key, "must be true or false");
       } else if (key === "childThinking" || key === "workerThinking") {
         if (typeof value === "string" && (THINKING as readonly string[]).includes(value)) config[key] = value as ThinkingLevel;
@@ -190,6 +198,7 @@ export function describeConfig(config: RecurseConfig): RecurseConfigFile {
   const spec = (m: RecurseConfig["worker"]) => (m ? `${m.provider}/${m.model}` : null);
   return {
     worker: spec(config.worker),
+    preferLocalSessionModel: config.preferLocalSessionModel,
     concurrency: config.concurrency,
     workerMaxTokens: config.workerMaxTokens,
     workerThinking: config.workerThinking,

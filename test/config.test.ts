@@ -52,7 +52,7 @@ describe("configuration edge cases", () => {
 
   it("formats every effective setting, including direct exposure", () => {
     expect(describeConfig({ ...DEFAULTS, exposure: "direct" })).toEqual({
-      worker: null, childModel: null, concurrency: 2, maxCalls: 500, maxPromptChars: 200_000,
+      worker: null, preferLocalSessionModel: true, childModel: null, concurrency: 2, maxCalls: 500, maxPromptChars: 200_000,
       maxLoadBytes: 67_108_864, maxLoadFiles: 5000, exposure: "direct", maxDepth: 2,
       childThinking: "low", childTimeoutMs: 600_000, steer: true,
       workerMaxTokens: 512, workerThinking: "off", workerTemperature: 0, childConcurrency: 1, childMaxTurns: 8,

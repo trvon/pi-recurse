@@ -41,7 +41,7 @@ Tools are codemode-only by default (`exposure: "codemode"`). They return structu
 
 ## Configuration
 
-No file is required. Worker queries use the current session model unless overridden.
+No file is required. Worker queries use the current session model unless overridden. When the session model is served locally (llama.cpp, Ollama, LM Studio, vLLM and similar on this machine or the local network), workers and children use it even if `worker` or `childModel` is set: it is already loaded, and a different local model would have to be loaded next to it. Set `preferLocalSessionModel` to `false` to always use the configured models.
 
 Files, in load order:
 
@@ -62,6 +62,7 @@ Every key is optional.
 | Key | Default | Meaning |
 |---|---|---|
 | `worker` | session model | Worker as `"provider/model"`. |
+| `preferLocalSessionModel` | `true` | Use a locally served session model instead of `worker` / `childModel`. Local means a base URL on loopback, a private or link-local address, or a `.local` name. Per-call `model` always wins. |
 | `concurrency` | `2` | Concurrent worker queries across the recursion tree; not child sessions. |
 | `workerMaxTokens` | `512` | Output-token cap per worker call, including reasoning. Per-call `max_tokens` wins. |
 | `workerThinking` | `"off"` | Worker reasoning: `off`, `minimal`, `low`, `medium`, `high`; mapped by Pi where the model/provider supports it. |
