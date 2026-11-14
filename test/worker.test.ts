@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { DEFAULTS, loadConfig, parseModelSpec, type RecurseConfigFile, resolveConfig } from "../src/config.js";
+import { DEFAULTS, loadConfig, parseModelSpec, type RecurseConfigFile, resolveConfig, WORKER_SYSTEM_PROMPT } from "../src/config.js";
 import { type ModelRuntime, Worker, type WorkerMessage } from "../src/worker.js";
 
 const cfg = (file: RecurseConfigFile) => resolveConfig([{ source: "test", data: file }]).config;
@@ -117,5 +117,27 @@ describe("Worker", () => {
     });
     await Promise.all(Array.from({ length: 6 }, () => w.query(rt, undefined, { prompt: "a" })));
     expect(peak).toBe(2);
+  });
+});
+
+describe("worker system prompt", () => {
+  const known = (provider: string, id: string) => ({ provider, id });
+  const local = { provider: "llamacpp", id: "qwen3.6-35b", baseUrl: "http://127.0.0.1:8080/v1" };
+  const cfg = (data: object) => resolveConfig([{ source: "t", data }]).config;
+
+  it("sends the default worker system prompt unless the call or the config replaces it", async () => {
+    const seen: (string | undefined)[] = [];
+    const capture: ModelRuntime = {
+      find: known,
+      async completeSimple(_m, c) {
+        seen.push((c as { systemPrompt?: string }).systemPrompt);
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    };
+    await new Worker(cfg({})).query(capture, local, { prompt: "q" });
+    await new Worker(cfg({})).query(capture, local, { prompt: "q", system: "own" });
+    await new Worker(cfg({ workerSystemPrompt: null })).query(capture, local, { prompt: "q" });
+    await new Worker(cfg({ workerSystemPrompt: "custom" })).query(capture, local, { prompt: "q" });
+    expect(seen).toEqual([WORKER_SYSTEM_PROMPT, "own", undefined, "custom"]);
   });
 });

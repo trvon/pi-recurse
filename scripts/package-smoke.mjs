@@ -24,7 +24,7 @@ const names = [];
 const events = [];
 mod.default({ registerTool: (tool) => names.push(tool.name), on: (event) => events.push(event), registerCommand: () => {} });
 if (!events.includes("tool_result")) throw new Error("expected a tool_result hook");
-const expected = ["rlm_load", "rlm_peek", "llm_query", "llm_query_batched", "rlm_handles", "rlm_query"];
+const expected = ["rlm_load", "rlm_peek", "llm_query", "llm_query_batched", "rlm_handles", "rlm_wait", "rlm_jobs", "rlm_query"];
 if (JSON.stringify(names) !== JSON.stringify(expected)) throw new Error(`registered ${names.join(",")}, expected ${expected.join(",")}`);
 
 console.log(`package smoke ok: ${files.size} files, tools ${names.join(", ")}`);

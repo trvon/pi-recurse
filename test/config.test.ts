@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { configPaths, DEFAULTS, describeConfig, loadConfig, parseModelSpec, resolveConfig } from "../src/config.js";
+import { configPaths, DEFAULTS, describeConfig, loadConfig, parseModelSpec, resolveConfig, WORKER_SYSTEM_PROMPT } from "../src/config.js";
 
 const roots: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -52,7 +52,7 @@ describe("configuration edge cases", () => {
 
   it("formats every effective setting, including direct exposure", () => {
     expect(describeConfig({ ...DEFAULTS, exposure: "direct" })).toEqual({
-      worker: null, childModel: null, concurrency: 2, maxCalls: 500, maxPromptChars: 200_000,
+      worker: null, preferLocalSessionModel: true, workerSystemPrompt: WORKER_SYSTEM_PROMPT, childModel: null, concurrency: 2, maxCalls: 500, maxPromptChars: 200_000,
       maxLoadBytes: 67_108_864, maxLoadFiles: 5000, exposure: "direct", maxDepth: 2,
       childThinking: "low", childTimeoutMs: 600_000, steer: true,
       workerMaxTokens: 512, workerThinking: "off", workerTemperature: 0, childConcurrency: 1, childMaxTurns: 8,

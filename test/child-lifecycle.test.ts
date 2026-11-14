@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type ChildDeps, type ChildRequest, runChild } from "../src/child.js";
 import { DEFAULTS } from "../src/config.js";
 import { HandleStore } from "../src/handles.js";
+import { JobStore } from "../src/jobs.js";
 import { Worker } from "../src/worker.js";
 
 const sdk = vi.hoisted(() => {
@@ -98,7 +99,7 @@ describe("runChild lifecycle (mock SDK, no model requests)", () => {
     const options = sdk.loader.mock.calls[0]?.[0] as { extensionFactories: ((pi: ExtensionAPI) => void)[] };
     const pi = {} as ExtensionAPI;
     options.extensionFactories[1]?.(pi);
-    expect(d.register).toHaveBeenCalledWith(pi, 1, req.store);
+    expect(d.register).toHaveBeenCalledWith(pi, 1, req.store, expect.any(JobStore));
     expect(sdk.create).toHaveBeenCalledWith(expect.objectContaining({ model: request().model, thinkingLevel: "low", excludeTools: ["bash", "edit", "write"] }));
     expect(sdk.overrides).toHaveBeenCalledWith({ defaultTools: ["+codemode"] });
     expect(sdk.settings).toHaveBeenCalledWith({ compaction: { enabled: false } });

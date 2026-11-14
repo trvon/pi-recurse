@@ -49,6 +49,36 @@ return { network: network.answer, storage: storage.answer };
 
 Child sessions take more time and model calls than a single worker query. Use them for selected sub-tasks, not a query over every file.
 
+## Background jobs
+
+A local worker can take tens of seconds per call. Instead of blocking the turn, start the work with `background: true`, keep going, and collect it later:
+
+```js
+const input = await tools.rlm_load({ paths: ["src"] });
+const { files } = await tools.rlm_peek({ handle: input.handle, pattern: "retry", files_only: true });
+const { job } = await tools.llm_query_batched({
+  background: true,
+  queries: files.map((file) => ({ handle: input.handle, file, prompt: "How does this file retry failed requests? Quote the code." })),
+});
+store("retry-job", job);
+return `started ${job} over ${files.length} files`;
+```
+
+Do other work in the meantime, such as direct reads of files you already know about. Then, in a later script:
+
+```js
+const { done, pending } = await tools.rlm_wait({ jobs: [load("retry-job")], timeout_ms: 120000 });
+if (pending.length) return { still_running: pending.map((p) => p.job) };
+return done[0].result.results.filter((r) => !r.error && !r.empty);
+```
+
+- `rlm_wait` waits for all given jobs (default: every uncollected one), for the first with `any: true`, or until `timeout_ms` (default 5 minutes; `0` just checks). It returns finished jobs once and forgets them. Pending jobs keep running.
+- A done item's `result` is exactly what the call would have returned; a failed job carries `error` instead.
+- `rlm_jobs()` lists jobs without collecting them; `rlm_jobs({ cancel: [id] })` stops running ones.
+- Jobs belong to their session: a child's jobs end with the child, the top-level session's jobs with the session. At most 64 jobs may be held at once.
+- When the agent is about to finish with jobs not collected, pi-recurse adds a reminder and lets it continue once.
+- Background calls share the same `concurrency`, `maxCalls` and `childConcurrency` limits as blocking ones. When the worker is the session's own local model, it also shares that server's parallel slots with the main conversation.
+
 ## Handles
 
 Pass the ID from `rlm_load` as `handle`. Tools also accept the load result object or text containing exactly one known handle ID. Omit `handle` to use the most recently loaded user handle. Internal child slices do not replace that default.
@@ -77,6 +107,8 @@ Worker answers can stay in codemode `store`/`load`; for searchable aggregates ex
 
 ## Worker choice
 
-The default is the current session model. Set `worker` in `pi-recurse.json` for a separate model; set `childModel` to choose a different model for recursive children. Per-call `model` overrides both. See the [configuration reference](../README.md#configuration) for precedence and file locations.
+The default is the current session model. Set `worker` in `pi-recurse.json` for a separate model; set `childModel` to choose a different model for recursive children. Per-call `model` overrides both. When the session model is served locally, it replaces `worker` and `childModel` (`preferLocalSessionModel`, default `true`): switching the session to another local model then moves the workers with it instead of loading a second model.
+
+Worker calls without their own `system` get `workerSystemPrompt`: answer only from the context, quote evidence with file paths, and reply `NONE` when the answer is absent. Small local models follow this much more reliably than a bare question. Set it to `null` to send no system prompt. See the [configuration reference](../README.md#configuration) for precedence and file locations.
 
 Measure both prefill and generation. A short final answer can still consume thousands of hidden reasoning tokens, so shrinking input or increasing concurrency may not reduce latency. Worker defaults favor short extraction; explicitly increase `workerThinking`/`workerMaxTokens` for harder tasks. `duration_ms` includes queue wait. If your model ignores reasoning controls, the token cap still bounds generation and status exposes incomplete results. Disabling reasoning-effort support in a provider entry can prevent `workerThinking` from taking effect. Reasoning-only models may not support an off mode at all. For low-latency extraction, select a worker with a verified non-reasoning mode; raising the token cap alone can merely restore long waits. Ask for `NONE` explicitly for no matches instead of interpreting empty text as success.

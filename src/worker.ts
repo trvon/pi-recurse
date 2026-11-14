@@ -51,6 +51,29 @@ export interface QueryResult {
   durationMs: number;
 }
 
+/**
+ * Whether a model is served from this machine or the local network, judged by its base URL:
+ * loopback, private IPv4 ranges, link-local, IPv6 unique-local, and `.local` / `.localhost` names.
+ */
+export function isLocalModel(model: unknown): boolean {
+  const baseUrl = (model as { baseUrl?: unknown } | undefined)?.baseUrl;
+  if (typeof baseUrl !== "string" || !baseUrl) return false;
+  let host: string;
+  try {
+    host = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
+  if (host === "::1" || host === "::" || /^f[cd][0-9a-f]{2}:/.test(host) || host.startsWith("fe80:")) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host);
+  if (!v4) return false;
+  const a = Number(v4[1]);
+  const b = Number(v4[2]);
+  return a === 127 || a === 10 || a === 0 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254);
+}
+
 export class Worker {
   private calls = 0;
   private readonly limiter: Limiter;
@@ -78,10 +101,18 @@ export class Worker {
     return Math.max(0, this.config.maxCalls - this.calls);
   }
 
-  /** Model to use: per-call override, then the configured worker, then the session's model. */
-  resolveModel(runtime: ModelRuntime, sessionModel: unknown, override?: string): { model: unknown; name: string } {
-    const spec = override ? parseModelSpec(override) : this.config.worker;
-    if (override && !spec) throw new Error(`model "${override}" must look like "provider/model"`);
+  /**
+   * Model to use: the per-call override; else the session model when it is local and
+   * `preferLocalSessionModel` is on (it is already loaded); else `configured` (the worker, or the
+   * child model for rlm_query); else the session model.
+   */
+  resolveModel(
+    runtime: ModelRuntime, sessionModel: unknown, override?: string, configured: RecurseConfig["worker"] = this.config.worker,
+  ): { model: unknown; name: string } {
+    const parsed = override ? parseModelSpec(override) : undefined;
+    if (override && !parsed) throw new Error(`model "${override}" must look like "provider/model"`);
+    const preferSession = !parsed && this.config.preferLocalSessionModel && sessionModel !== undefined && isLocalModel(sessionModel);
+    const spec = parsed ?? (preferSession ? undefined : configured);
     if (spec) {
       const model = runtime.find(spec.provider, spec.model);
       if (!model) throw new Error(`model ${spec.provider}/${spec.model} is not configured in pi`);
@@ -117,7 +148,7 @@ export class Worker {
       return runtime.completeSimple(
         model,
         {
-          systemPrompt: input.system,
+          systemPrompt: input.system ?? this.config.workerSystemPrompt,
           messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
         },
         {

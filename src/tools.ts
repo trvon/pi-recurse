@@ -3,7 +3,8 @@ import { type Static, Type } from "typebox";
 import type { ChildRequest, ChildResult } from "./child.js";
 import type { RecurseConfig } from "./config.js";
 import type { HandleStore } from "./handles.js";
-import { type QueryInput, type QueryResult, type Worker, workerRuntime } from "./worker.js";
+import type { JobStore } from "./jobs.js";
+import { type ModelRuntime, type QueryInput, type QueryResult, type Worker, workerRuntime } from "./worker.js";
 
 type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 
@@ -22,6 +23,10 @@ const ContextRef = {
   ),
 };
 
+const BACKGROUND_DOC =
+  "Start in the background and return { job } at once instead of waiting; collect the answer later with rlm_wait. " +
+  "Use when the worker is slow (a local model) and there is other work to do meanwhile.";
+
 const QueryParams = Type.Object({
   prompt: Type.String({ description: "Question or instruction for the worker model." }),
   ...ContextRef,
@@ -29,8 +34,17 @@ const QueryParams = Type.Object({
   system: Type.Optional(Type.String()),
   model: Type.Optional(Type.String({ description: 'Override the worker model, "provider/model".' })),
   max_tokens: Type.Optional(Type.Integer({ minimum: 1 })),
+  background: Type.Optional(Type.Boolean({ description: BACKGROUND_DOC })),
 });
 type QueryParamsT = Static<typeof QueryParams>;
+
+/** What a call with `background: true` returns. */
+const JobStarted = Type.Object({ job: Type.String(), status: Type.Literal("running"), model: Type.String() });
+
+const JobViewOutput = Type.Object({
+  job: Type.String(), kind: Type.String(), label: Type.String(), status: Type.String(), elapsed_ms: Type.Number(),
+  result: Type.Optional(Type.Unknown()), error: Type.Optional(Type.String()),
+});
 
 const QueryFields = {
   text: Type.String(), model: Type.String(), input_tokens: Type.Optional(Type.Number()), output_tokens: Type.Optional(Type.Number()),
@@ -128,6 +142,8 @@ export function steeringGuideline(exposure: "codemode" | "direct"): string {
     `${via}${t}rlm_load to hold text by handle and ${t}rlm_peek to select relevant slices. Prefer one combined ${t}llm_query ` +
     `when the selected text fits the prompt budget; use ${t}llm_query_batched only for genuinely independent shards or oversized input, ` +
     `not automatically per file. Reserve ${t}rlm_query for a branch needing its own multi-step search loop. ` +
+    `Worker calls on a local model can take tens of seconds: when there is other work to do, start them with background: true, ` +
+    `continue (read files, search, plan), and collect them with ${t}rlm_wait before relying on them; never finish with jobs uncollected. ` +
     "Check truncated/empty/error fields before using answers. Return only aggregated findings with file paths."
   );
 }
@@ -138,10 +154,13 @@ export const LOAD_GUIDELINES = [
     "select relevant text and prefer one combined llm_query if it fits. Only for independent shards or oversized input: " +
     "await tools.llm_query_batched({ queries: files.map(file => ({ prompt, handle: h.handle, file })) }); check error/truncated/empty before aggregating.",
   "Keep script output small. Use codemode store/load to retain JSON results across scripts; optionally rlm_load({ text: answer }) for searchable answer handles. Do not re-query already computed answers.",
+  "Slow worker: fire and collect later. const { job } = await tools.llm_query_batched({ queries, background: true }); store(\"job\", job); " +
+    "end the script, do other work, then in a later script: const { done, pending } = await tools.rlm_wait({ jobs: [load(\"job\")] }); " +
+    "done[i].result holds what the call would have returned; pending jobs keep running (wait again, or cancel with rlm_jobs).",
 ];
 
 /** Names of the tools this package registers; used to restore their structured results. */
-export const TOOL_NAMES = new Set(["rlm_load", "rlm_peek", "llm_query", "llm_query_batched", "rlm_handles", "rlm_query"]);
+export const TOOL_NAMES = new Set(["rlm_load", "rlm_peek", "llm_query", "llm_query_batched", "rlm_handles", "rlm_query", "rlm_wait", "rlm_jobs"]);
 
 /**
  * Tool-result rewriters (for example pi-tscg's result compression) replace the text content of
@@ -176,6 +195,8 @@ function toInput(store: HandleStore, p: QueryParamsT): QueryInput {
 export interface ToolDeps {
   store: HandleStore;
   worker: Worker;
+  /** Background jobs of the session these tools belong to. */
+  jobs: JobStore;
   config: RecurseConfig;
   /** Recursion depth of the session these tools belong to: 0 for the top-level session. */
   depth: number;
@@ -183,9 +204,61 @@ export interface ToolDeps {
   runChild: (req: ChildRequest) => Promise<ChildResult>;
 }
 
+/** A short job label from a prompt or task. */
+function labelOf(s: string): string {
+  const one = s.replace(/\s+/g, " ").trim();
+  return one.length > 60 ? `${one.slice(0, 57)}...` : one;
+}
+
+async function runBatch(
+  worker: Worker, runtime: ModelRuntime, sessionModel: unknown, store: HandleStore, queries: QueryParamsT[], signal: AbortSignal | undefined,
+  progress: (done: number, total: number) => void,
+): Promise<{ [key: string]: Json }[]> {
+  let done = 0;
+  return Promise.all(
+    queries.map(async (q): Promise<{ [key: string]: Json }> => {
+      let r: { [key: string]: Json };
+      try {
+        r = queryResult(await worker.query(runtime, sessionModel, toInput(store, q), signal));
+      } catch (e) {
+        r = { error: errorText(e) };
+      }
+      progress(++done, queries.length);
+      return r;
+    }),
+  );
+}
+
+/**
+ * Before the agent finishes a run, remind it once of background jobs it has not collected:
+ * their answers would otherwise be lost (and running ones keep using the worker).
+ */
+export function registerJobReminder(pi: ExtensionAPI, jobs: JobStore, wait = "tools.rlm_wait"): void {
+  let reminded = false;
+  pi.on("agent_start", () => {
+    reminded = false;
+  });
+  pi.on("agent_before_settle", () => {
+    if (reminded || jobs.size === 0) return undefined;
+    reminded = true;
+    const views = jobs.list();
+    const running = views.filter((v) => v.status === "running").length;
+    const list = views.map((v) => `${v.job} (${v.kind}, ${v.status}): ${v.label}`).join("\n");
+    return {
+      entries: [{
+        type: "custom_message" as const, customType: "pi-recurse-jobs", display: false,
+        content: `pi-recurse: ${views.length} background job${views.length > 1 ? "s are" : " is"} not collected (${running} still running):\n${list}\n` +
+          `Collect them with ${wait} before answering, or cancel the ones you no longer need with rlm_jobs({ cancel: [...] }).`,
+      }],
+      continue: true,
+    };
+  });
+}
+
 export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
-  const { store, worker, config } = deps;
+  const { store, worker, config, jobs } = deps;
   const exposure = config.exposure;
+  const started = (job: string, model: string) => ok({ job, status: "running", model }, `started background job ${job} (${model}); collect it with rlm_wait`);
 
   pi.registerTool({
     name: "rlm_load",
@@ -272,12 +345,19 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     exposure,
     executionMode: "parallel",
     description:
-      "Ask the worker model one question, optionally about part of a loaded handle (whole handle, one file, a line or character range) or literal text. Returns text plus stop_reason, truncated, empty, duration_ms and usage. Check status before aggregating; an empty truncated result carries error, not a usable answer. Ask for NONE explicitly for no matches. No automatic retries.",
+      "Ask the worker model one question, optionally about part of a loaded handle (whole handle, one file, a line or character range) or literal text. Returns text plus stop_reason, truncated, empty, duration_ms and usage. Check status before aggregating; an empty truncated result carries error, not a usable answer. Ask for NONE explicitly for no matches. No automatic retries. With background: true, returns { job } at once (collect with rlm_wait).",
     parameters: QueryParams,
     prepareArguments: prepareQueryItem as (args: unknown) => QueryParamsT,
-    outputSchema: QueryOutput,
+    outputSchema: Type.Union([QueryOutput, JobStarted]),
     async execute(_id, p, signal, _onUpdate, ctx) {
-      const r = await worker.query(workerRuntime(ctx.modelRegistry), ctx.model, toInput(store, p), signal);
+      const runtime = workerRuntime(ctx.modelRegistry);
+      const input = toInput(store, p);
+      if (p.background) {
+        const { name } = worker.resolveModel(runtime, ctx.model, p.model);
+        const sessionModel = ctx.model;
+        return started(jobs.start("llm_query", labelOf(p.prompt), async (s) => queryResult(await worker.query(runtime, sessionModel, input, s))), name);
+      }
+      const r = await worker.query(runtime, ctx.model, input, signal);
       const result = queryResult(r);
       return ok(result, result.error ? String(result.error) : r.truncated ? `[truncated] ${r.text}` : r.empty ? "[empty completion]" : r.text);
     },
@@ -289,31 +369,26 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     exposure,
     executionMode: "parallel",
     description:
-      "Run many llm_query sub-queries concurrently (bounded by the configured concurrency) and return the answers in order. Each item takes the same fields as llm_query. Provider failures carry error instead of text; empty truncated completions carry error plus status and usage. Inspect truncated/empty on every item.",
-    parameters: Type.Object({ queries: Type.Array(QueryParams, { minItems: 1, maxItems: 256 }) }),
+      "Run many llm_query sub-queries concurrently (bounded by the configured concurrency) and return the answers in order. Each item takes the same fields as llm_query (an item's own background flag is ignored). Provider failures carry error instead of text; empty truncated completions carry error plus status and usage. Inspect truncated/empty on every item. With background: true, returns { job } at once; rlm_wait then gives { results } as the result.",
+    parameters: Type.Object({
+      queries: Type.Array(QueryParams, { minItems: 1, maxItems: 256 }),
+      background: Type.Optional(Type.Boolean({ description: BACKGROUND_DOC })),
+    }),
     prepareArguments: (args: unknown) => {
       const a = args as { queries?: unknown };
-      return (Array.isArray(a?.queries) ? { ...a, queries: a.queries.map(prepareQueryItem) } : args) as { queries: QueryParamsT[] };
+      return (Array.isArray(a?.queries) ? { ...a, queries: a.queries.map(prepareQueryItem) } : args) as { queries: QueryParamsT[]; background?: boolean };
     },
-    outputSchema: Type.Object({ results: Type.Array(Type.Union([QueryOutput, Type.Object({ error: Type.String() })])) }),
+    outputSchema: Type.Union([Type.Object({ results: Type.Array(Type.Union([QueryOutput, Type.Object({ error: Type.String() })])) }), JobStarted]),
     async execute(_id, p, signal, onUpdate, ctx) {
       const runtime = workerRuntime(ctx.modelRegistry);
-      const total = p.queries.length;
-      let done = 0;
-      const results = await Promise.all(
-        p.queries.map(async (q): Promise<{ [key: string]: Json }> => {
-          let r: { [key: string]: Json };
-          try {
-            const a = await worker.query(runtime, ctx.model, toInput(store, q), signal);
-            r = queryResult(a);
-          } catch (e) {
-            r = { error: errorText(e) };
-          }
-          done++;
-          onUpdate?.({ content: [{ type: "text", text: `${done}/${total} sub-queries done` }], details: { done, total } });
-          return r;
-        }),
-      );
+      if (p.background) {
+        const { name } = worker.resolveModel(runtime, ctx.model, p.queries[0]?.model);
+        const sessionModel = ctx.model;
+        const label = `${p.queries.length} queries: ${labelOf(p.queries[0]?.prompt ?? "")}`;
+        return started(jobs.start("llm_query_batched", label, async (s) => ({ results: await runBatch(worker, runtime, sessionModel, store, p.queries, s, () => {}) })), name);
+      }
+      const results = await runBatch(worker, runtime, ctx.model, store, p.queries, signal, (done, total) =>
+        onUpdate?.({ content: [{ type: "text", text: `${done}/${total} sub-queries done` }], details: { done, total } }));
       const failed = results.filter((r) => "error" in r).length;
       return ok({ results }, `${results.length - failed}/${results.length} answered${failed ? `, ${failed} failed` : ""}; ${worker.callsLeft} calls left`);
     },
@@ -333,6 +408,56 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     },
   });
 
+  pi.registerTool({
+    name: "rlm_wait",
+    label: "rlm_wait",
+    exposure,
+    executionMode: "parallel",
+    description:
+      "Collect background jobs started with background: true. Waits until the given jobs (default: all) finish, or the first one with any: true, or timeout_ms (default 300000). Finished jobs come back in done with result = what the call would have returned, and are forgotten; the rest are listed in pending and keep running. A failed job carries error.",
+    parameters: Type.Object({
+      jobs: Type.Optional(Type.Array(Type.String(), { description: "Job ids; default all uncollected jobs." })),
+      any: Type.Optional(Type.Boolean({ description: "Return as soon as one of them has finished." })),
+      timeout_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 3_600_000, description: "Longest wait; 0 just checks." })),
+    }),
+    prepareArguments: (args: unknown) => {
+      const a = args && typeof args === "object" ? { ...(args as Record<string, unknown>) } : args;
+      // scripts pass the start result itself, a bare id, or a list of either
+      const id = (v: unknown) => (v && typeof v === "object" && typeof (v as { job?: unknown }).job === "string" ? (v as { job: string }).job : v);
+      if (a && typeof a === "object") {
+        const r = a as Record<string, unknown>;
+        if (r.jobs === undefined && r.job !== undefined) r.jobs = r.job;
+        delete r.job;
+        if (r.jobs !== undefined && !Array.isArray(r.jobs)) r.jobs = [r.jobs];
+        if (Array.isArray(r.jobs)) r.jobs = r.jobs.map(id);
+      }
+      return a as { jobs?: string[]; any?: boolean; timeout_ms?: number };
+    },
+    outputSchema: Type.Object({ done: Type.Array(JobViewOutput), pending: Type.Array(JobViewOutput) }),
+    async execute(_id, p, signal) {
+      const r = await jobs.wait(p.jobs, { timeoutMs: p.timeout_ms ?? 300_000, any: p.any, signal });
+      // SAFETY: job views contain only JSON fields.
+      const value = r as unknown as Json;
+      const failed = r.done.filter((d) => d.error !== undefined).length;
+      return ok(value, `${r.done.length} done${failed ? ` (${failed} failed)` : ""}, ${r.pending.length} pending`);
+    },
+  });
+
+  pi.registerTool({
+    name: "rlm_jobs",
+    label: "rlm_jobs",
+    exposure,
+    description: "List background jobs (running, or finished and not yet collected) without collecting them, or cancel running ones.",
+    parameters: Type.Object({ cancel: Type.Optional(Type.Array(Type.String(), { description: "Running job ids to cancel." })) }),
+    outputSchema: Type.Object({ jobs: Type.Array(JobViewOutput), cancelled: Type.Array(Type.String()) }),
+    async execute(_id, p) {
+      const cancelled = jobs.cancel(p.cancel ?? []);
+      // SAFETY: job views contain only JSON fields.
+      const list = jobs.list() as unknown as Json;
+      return ok({ jobs: list, cancelled }, `${jobs.size} jobs (${jobs.running} running)${cancelled.length ? `, cancelled ${cancelled.join(", ")}` : ""}`);
+    },
+  });
+
   if (deps.depth >= config.maxDepth) return;
 
   pi.registerTool({
@@ -341,21 +466,23 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
     exposure,
     executionMode: "parallel",
     description:
-      "Delegate a sub-task to a recursive sub-agent: a fresh session with codemode and these same tools, working on a handle (or a slice of it, or literal text). Use it when a part of the problem needs its own search-and-reason loop, not just one llm_query answer. Returns the sub-agent's final answer. Slower and costlier than llm_query.",
+      "Delegate a sub-task to a recursive sub-agent: a fresh session with codemode and these same tools, working on a handle (or a slice of it, or literal text). Use it when a part of the problem needs its own search-and-reason loop, not just one llm_query answer. Returns the sub-agent's final answer. Slower and costlier than llm_query; with background: true, returns { job } at once (collect with rlm_wait).",
     parameters: Type.Object({
       task: Type.String({ description: "What the sub-agent must find out or produce." }),
       ...ContextRef,
       text: Type.Optional(Type.String({ description: "Literal input text, instead of a handle." })),
       model: Type.Optional(Type.String({ description: 'Override the sub-agent model, "provider/model".' })),
+      background: Type.Optional(Type.Boolean({ description: BACKGROUND_DOC })),
     }),
     prepareArguments: prepareQueryArguments as (args: unknown) => never,
-    outputSchema: Type.Object({ answer: Type.String(), depth: Type.Number(), model: Type.String(), handle: Type.Optional(Type.String()) }),
+    outputSchema: Type.Union([Type.Object({ answer: Type.String(), depth: Type.Number(), model: Type.String(), handle: Type.Optional(Type.String()) }), JobStarted]),
     async execute(_id, p, signal, onUpdate, ctx) {
       validateContext(p);
-      // Validate model selection before allocating a private slice.
-      const spec = p.model ?? (config.child ? `${config.child.provider}/${config.child.model}` : undefined);
-      const { model, name } = worker.resolveModel(workerRuntime(ctx.modelRegistry), ctx.model, spec);
-      return worker.runChild(deps.depth + 1, async () => {
+      // Validate model selection before allocating a private slice: the call's model, else the
+      // child model, else the worker (a local session model wins over both, see resolveModel).
+      const { model, name } = worker.resolveModel(workerRuntime(ctx.modelRegistry), ctx.model, p.model, config.child ?? config.worker);
+      // a background run outlives this tool call, so it reports no progress through onUpdate
+      const run = (signal: AbortSignal | undefined, update: typeof onUpdate) => worker.runChild(deps.depth + 1, async () => {
       const sliced = p.text !== undefined || Boolean(p.file || p.lines || p.chars);
       let handle: string | undefined;
       if (sliced) {
@@ -369,7 +496,7 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
       const childStore = store.scope(handle ? [handle] : []);
       try {
         const handles = handle ? [summarize(store, handle)] : [];
-        onUpdate?.({ content: [{ type: "text", text: `sub-agent (depth ${depth}, ${name}) working` }], details: { depth } });
+        update?.({ content: [{ type: "text", text: `sub-agent (depth ${depth}, ${name}) working` }], details: { depth } });
         const r = await deps.runChild({ cwd: ctx.cwd, task: p.task, handles, store: childStore, depth, model, signal });
         return ok({ answer: r.answer, depth, model: name, ...(!sliced && handle ? { handle } : {}) }, r.answer);
       } finally {
@@ -378,6 +505,8 @@ export function registerTools(pi: ExtensionAPI, deps: ToolDeps): void {
         if (sliced && handle) store.drop(handle);
       }
       }, signal);
+      if (p.background) return started(jobs.start("rlm_query", labelOf(p.task), async (s) => (await run(s, undefined)).structuredContent), name);
+      return run(signal, onUpdate);
     },
   });
 }

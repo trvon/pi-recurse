@@ -25,7 +25,9 @@ beforeEach(() => vi.clearAllMocks());
 describe("extension entry point", () => {
   it("registers tools/hooks and displays defaults without config files", async () => {
     const { tools, events, commands } = setup({ config: DEFAULTS, sources: [], warnings: [] });
-    expect(tools).toHaveLength(6);
+    expect(tools).toHaveLength(8);
+    expect(events.has("agent_before_settle")).toBe(true);
+    expect(events.has("session_shutdown")).toBe(true);
     expect(events.has("tool_result")).toBe(true);
     const notify = vi.fn();
     events.get("session_start")?.({}, { ui: { notify } });

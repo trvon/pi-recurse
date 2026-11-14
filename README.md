@@ -38,10 +38,14 @@ Tools are codemode-only by default (`exposure: "codemode"`). They return structu
 | `llm_query_batched({ queries: [...] })` | Run worker queries up to `concurrency`. Return the same status/usage fields in ordered results with per-item errors; report progress. |
 | `rlm_query({ task, handle?, file?, lines?, chars?, text?, model? })` | Run a child session one level deeper. Return `{ answer, depth, model, handle? }`. Children have no `bash`, `edit` or `write`. Unavailable at `maxDepth`. |
 | `rlm_handles({ drop? })` | List handles or drop them to free memory. |
+| `rlm_wait({ jobs?, any?, timeout_ms? })` | Collect background jobs. Return `{ done, pending }`; each done item's `result` is what the call would have returned. Pending jobs keep running. |
+| `rlm_jobs({ cancel? })` | List background jobs without collecting them, or cancel running ones. |
+
+`llm_query`, `llm_query_batched` and `rlm_query` take `background: true` to return `{ job }` at once. The model can keep working (read files, search, plan) while a slow worker runs, then collect the answers with `rlm_wait`. Jobs end with their session; before the agent finishes, pi-recurse reminds it once of jobs it has not collected.
 
 ## Configuration
 
-No file is required. Worker queries use the current session model unless overridden.
+No file is required. Worker queries use the current session model unless overridden. When the session model is served locally (llama.cpp, Ollama, LM Studio, vLLM and similar on this machine or the local network), workers and children use it even if `worker` or `childModel` is set: it is already loaded, and a different local model would have to be loaded next to it. Set `preferLocalSessionModel` to `false` to always use the configured models.
 
 Files, in load order:
 
@@ -62,6 +66,8 @@ Every key is optional.
 | Key | Default | Meaning |
 |---|---|---|
 | `worker` | session model | Worker as `"provider/model"`. |
+| `preferLocalSessionModel` | `true` | Use a locally served session model instead of `worker` / `childModel`. Local means a base URL on loopback, a private or link-local address, or a `.local` name. Per-call `model` always wins. |
+| `workerSystemPrompt` | grounded-answer prompt | System prompt for worker calls without their own `system`: answer only from the context, quote evidence with file paths, reply `NONE` when absent. `null` sends none. |
 | `concurrency` | `2` | Concurrent worker queries across the recursion tree; not child sessions. |
 | `workerMaxTokens` | `512` | Output-token cap per worker call, including reasoning. Per-call `max_tokens` wins. |
 | `workerThinking` | `"off"` | Worker reasoning: `off`, `minimal`, `low`, `medium`, `high`; mapped by Pi where the model/provider supports it. |

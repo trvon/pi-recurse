@@ -8,6 +8,14 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
 export interface RecurseConfig {
   /** Worker model as "provider/model". Unset: the session's current model. */
   worker: { provider: string; model: string } | undefined;
+  /**
+   * When the session model is served from this machine or the local network (llama.cpp, Ollama,
+   * LM Studio, vLLM...), use it for workers and children instead of `worker` / `childModel`: it is
+   * already loaded, while a different local model would have to be loaded next to it.
+   */
+  preferLocalSessionModel: boolean;
+  /** System prompt for worker calls without their own `system`; undefined sends none. */
+  workerSystemPrompt: string | undefined;
   /** Maximum concurrent worker calls; tune against measured server throughput. */
   concurrency: number;
   /** Output budget per worker call, including reasoning tokens. */
@@ -45,6 +53,8 @@ export interface RecurseConfig {
 /** The JSON file format: every key optional, models as "provider/model" strings. */
 export interface RecurseConfigFile {
   worker?: string | null;
+  preferLocalSessionModel?: boolean;
+  workerSystemPrompt?: string | null;
   concurrency?: number;
   workerMaxTokens?: number;
   workerThinking?: ThinkingLevel;
@@ -65,8 +75,17 @@ export interface RecurseConfigFile {
 
 export const CONFIG_FILE = "pi-recurse.json";
 
+/** Default worker system prompt: grounded, quoted, short. Small local models follow it noticeably better than a bare question. */
+export const WORKER_SYSTEM_PROMPT =
+  "You answer one question about the text inside <context>. Use only that text, not prior knowledge. " +
+  "Support each claim with a short exact quote and its file path when the context names files. " +
+  "If the context does not contain the answer, reply exactly NONE. " +
+  "Reply with the answer only: no preamble, no restating the question, no description of your process.";
+
 export const DEFAULTS: RecurseConfig = {
   worker: undefined,
+  preferLocalSessionModel: true,
+  workerSystemPrompt: WORKER_SYSTEM_PROMPT,
   concurrency: 2,
   workerMaxTokens: 512,
   workerThinking: "off",
@@ -144,9 +163,13 @@ export function resolveConfig(layers: { source: string; data: unknown }[]): Load
       } else if (key === "exposure") {
         if (value === "codemode" || value === "direct") config.exposure = value;
         else bad(key, 'must be "codemode" or "direct"');
-      } else if (key === "steer") {
-        if (typeof value === "boolean") config.steer = value;
+      } else if (key === "steer" || key === "preferLocalSessionModel") {
+        if (typeof value === "boolean") config[key] = value;
         else bad(key, "must be true or false");
+      } else if (key === "workerSystemPrompt") {
+        if (value === null) config.workerSystemPrompt = undefined;
+        else if (typeof value === "string") config.workerSystemPrompt = value;
+        else bad(key, "must be a string (or null for no system prompt)");
       } else if (key === "childThinking" || key === "workerThinking") {
         if (typeof value === "string" && (THINKING as readonly string[]).includes(value)) config[key] = value as ThinkingLevel;
         else bad(key, `must be one of ${THINKING.join(", ")}`);
@@ -190,6 +213,8 @@ export function describeConfig(config: RecurseConfig): RecurseConfigFile {
   const spec = (m: RecurseConfig["worker"]) => (m ? `${m.provider}/${m.model}` : null);
   return {
     worker: spec(config.worker),
+    preferLocalSessionModel: config.preferLocalSessionModel,
+    workerSystemPrompt: config.workerSystemPrompt ?? null,
     concurrency: config.concurrency,
     workerMaxTokens: config.workerMaxTokens,
     workerThinking: config.workerThinking,

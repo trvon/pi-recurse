@@ -2,14 +2,16 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { runChild } from "./child.js";
 import { describeConfig, loadConfig } from "./config.js";
 import { HandleStore } from "./handles.js";
-import { registerTools, restoreStructuredResults, steeringGuideline } from "./tools.js";
+import { JobStore } from "./jobs.js";
+import { registerJobReminder, registerTools, restoreStructuredResults, steeringGuideline } from "./tools.js";
 import { Worker } from "./worker.js";
 
 export { CHILD_EXCLUDED_TOOLS, childPrompt, runChild } from "./child.js";
 export { CONFIG_FILE, configPaths, DEFAULTS, describeConfig, loadConfig, parseModelSpec, resolveConfig } from "./config.js";
 export { HandleStore } from "./handles.js";
-export { registerTools, restoreStructuredResults, steeringGuideline } from "./tools.js";
-export { Worker } from "./worker.js";
+export { JobStore, MAX_JOBS } from "./jobs.js";
+export { registerJobReminder, registerTools, restoreStructuredResults, steeringGuideline } from "./tools.js";
+export { isLocalModel, Worker } from "./worker.js";
 
 /**
  * Pi extension entry point: registers the RLM tools (codemode-only by default).
@@ -20,10 +22,15 @@ export default function piRecurse(pi: ExtensionAPI): void {
   const { config, sources, warnings } = loadConfig();
   const store = new HandleStore();
   const worker = new Worker(config);
-  const register = (api: ExtensionAPI, depth: number, view: HandleStore): void =>
-    registerTools(api, { store: view, worker, config, depth, runChild: (req) => runChild(req, { store: req.store, worker, config, register }) });
-  register(pi, 0, store);
+  const register = (api: ExtensionAPI, depth: number, view: HandleStore, jobs: JobStore): void => {
+    registerTools(api, { store: view, worker, config, depth, jobs, runChild: (req) => runChild(req, { store: req.store, worker, config, register }) });
+    registerJobReminder(api, jobs, config.exposure === "direct" ? "rlm_wait" : "tools.rlm_wait");
+  };
+  const jobs = new JobStore();
+  register(pi, 0, store, jobs);
   restoreStructuredResults(pi);
+  // background jobs never outlive the session that started them
+  pi.on("session_shutdown", () => jobs.dispose());
 
   // Point the model at the RLM tools for large inputs; only when they are reachable this turn.
   const guideline = steeringGuideline(config.exposure === "direct" ? "direct" : "codemode");

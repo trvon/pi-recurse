@@ -1,6 +1,7 @@
 import type { AgentSession, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RecurseConfig } from "./config.js";
 import type { HandleStore } from "./handles.js";
+import { JobStore } from "./jobs.js";
 import type { Worker } from "./worker.js";
 
 /** Builtin tools a child must not have: it answers questions, it does not change the workspace. */
@@ -10,7 +11,8 @@ export const CHILD_SYSTEM_PROMPT = `You are a sub-agent of a Recursive Language 
 Answer one task about input held by handle, not pasted into this conversation.
 Use tools.rlm_peek to search/select relevant slices. Prefer one combined tools.llm_query when it fits.
 Batch only independent shards. Reserve tools.rlm_query for branches needing their own search loop.
-Check error/truncated/empty before using worker answers. Keep script output small and retain intermediate
+Check error/truncated/empty before using worker answers. A slow worker can run in the background
+(background: true, then tools.rlm_wait); collect every job before you answer. Keep script output small and retain intermediate
 JSON with codemode store/load. Your default handle is the assigned input; other sessions' handles are unavailable.
 Reply with the answer only: no preamble, no description of your process.`;
 
@@ -35,7 +37,7 @@ export interface ChildDeps {
   store: HandleStore;
   worker: Worker;
   config: RecurseConfig;
-  register: (pi: ExtensionAPI, depth: number, store: HandleStore) => void;
+  register: (pi: ExtensionAPI, depth: number, store: HandleStore, jobs: JobStore) => void;
 }
 
 export function childPrompt(req: Pick<ChildRequest, "task" | "handles">): string {
@@ -62,6 +64,8 @@ export async function runChild(req: ChildRequest, deps: ChildDeps): Promise<Chil
   req.signal?.addEventListener("abort", abort, { once: true });
   const timer = setTimeout(() => stop(`rlm_query timed out after ${deps.config.childTimeoutMs}ms`), deps.config.childTimeoutMs);
   let unsubscribe: (() => void) | undefined;
+  // the child's own background jobs end with it, collected or not
+  const jobs = new JobStore(`d${req.depth}j`);
   const work = async (): Promise<ChildResult> => {
     const sdk = await import("@earendil-works/pi-coding-agent");
     if (stopped) throw stopped;
@@ -70,7 +74,7 @@ export async function runChild(req: ChildRequest, deps: ChildDeps): Promise<Chil
       agentDir: sdk.getAgentDir(),
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
       systemPrompt: CHILD_SYSTEM_PROMPT,
-      extensionFactories: [sdk.createCodemodeExtension({ mode: "on" }), (pi: ExtensionAPI) => deps.register(pi, req.depth, req.store)],
+      extensionFactories: [sdk.createCodemodeExtension({ mode: "on" }), (pi: ExtensionAPI) => deps.register(pi, req.depth, req.store, jobs)],
     });
     await resourceLoader.reload();
     if (stopped) throw stopped;
@@ -106,6 +110,7 @@ export async function runChild(req: ChildRequest, deps: ChildDeps): Promise<Chil
     clearTimeout(timer);
     req.signal?.removeEventListener("abort", abort);
     unsubscribe?.();
+    jobs.dispose();
     session?.dispose();
   }
 }
