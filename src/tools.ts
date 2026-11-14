@@ -142,6 +142,8 @@ export function steeringGuideline(exposure: "codemode" | "direct"): string {
     `${via}${t}rlm_load to hold text by handle and ${t}rlm_peek to select relevant slices. Prefer one combined ${t}llm_query ` +
     `when the selected text fits the prompt budget; use ${t}llm_query_batched only for genuinely independent shards or oversized input, ` +
     `not automatically per file. Reserve ${t}rlm_query for a branch needing its own multi-step search loop. ` +
+    `Worker calls on a local model can take tens of seconds: when there is other work to do, start them with background: true, ` +
+    `continue (read files, search, plan), and collect them with ${t}rlm_wait before relying on them; never finish with jobs uncollected. ` +
     "Check truncated/empty/error fields before using answers. Return only aggregated findings with file paths."
   );
 }
@@ -152,6 +154,9 @@ export const LOAD_GUIDELINES = [
     "select relevant text and prefer one combined llm_query if it fits. Only for independent shards or oversized input: " +
     "await tools.llm_query_batched({ queries: files.map(file => ({ prompt, handle: h.handle, file })) }); check error/truncated/empty before aggregating.",
   "Keep script output small. Use codemode store/load to retain JSON results across scripts; optionally rlm_load({ text: answer }) for searchable answer handles. Do not re-query already computed answers.",
+  "Slow worker: fire and collect later. const { job } = await tools.llm_query_batched({ queries, background: true }); store(\"job\", job); " +
+    "end the script, do other work, then in a later script: const { done, pending } = await tools.rlm_wait({ jobs: [load(\"job\")] }); " +
+    "done[i].result holds what the call would have returned; pending jobs keep running (wait again, or cancel with rlm_jobs).",
 ];
 
 /** Names of the tools this package registers; used to restore their structured results. */

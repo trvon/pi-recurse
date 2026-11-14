@@ -330,4 +330,10 @@ describe("background jobs", () => {
     await call("rlm_wait", { job: started.job });
     expect(((await call("rlm_jobs", {})).structuredContent as { jobs: unknown[] }).jobs).toEqual([]);
   });
+
+  it("tells codemode scripts how to fire and collect", () => {
+    expect(steeringGuideline("codemode")).toContain("background: true");
+    expect(steeringGuideline("codemode")).toContain("tools.rlm_wait");
+    expect(LOAD_GUIDELINES.join("\n")).toContain("rlm_wait");
+  });
 });

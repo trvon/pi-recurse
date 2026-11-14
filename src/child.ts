@@ -11,7 +11,8 @@ export const CHILD_SYSTEM_PROMPT = `You are a sub-agent of a Recursive Language 
 Answer one task about input held by handle, not pasted into this conversation.
 Use tools.rlm_peek to search/select relevant slices. Prefer one combined tools.llm_query when it fits.
 Batch only independent shards. Reserve tools.rlm_query for branches needing their own search loop.
-Check error/truncated/empty before using worker answers. Keep script output small and retain intermediate
+Check error/truncated/empty before using worker answers. A slow worker can run in the background
+(background: true, then tools.rlm_wait); collect every job before you answer. Keep script output small and retain intermediate
 JSON with codemode store/load. Your default handle is the assigned input; other sessions' handles are unavailable.
 Reply with the answer only: no preamble, no description of your process.`;
 
