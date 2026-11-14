@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { ChildRequest } from "../src/child.js";
 import { type RecurseConfigFile, resolveConfig } from "../src/config.js";
 import { HandleStore } from "../src/handles.js";
+import { JobStore } from "../src/jobs.js";
 import { LOAD_GUIDELINES, registerTools, restoreStructuredResults, steeringGuideline } from "../src/tools.js";
 import { Worker } from "../src/worker.js";
 
@@ -35,7 +36,7 @@ function setup(env: RecurseConfigFile = { worker: "llamacpp/flint" }, depth = 0,
     if (childError) throw childError;
     return { answer: `child@${req.depth}: ${req.task}`, depth: req.depth };
   };
-  registerTools(pi, { store, worker: new Worker(config), config, depth, runChild });
+  registerTools(pi, { store, worker: new Worker(config), config, depth, runChild, jobs: new JobStore() });
   const prompts: string[] = [];
   const ctx = {
     cwd: process.cwd(),
@@ -103,7 +104,7 @@ describe("registered tools", () => {
   });
   it("registers codemode-only tools by default, and rlm_query only below max depth", () => {
     const { tools } = setup();
-    expect([...tools.keys()]).toEqual(["rlm_load", "rlm_peek", "llm_query", "llm_query_batched", "rlm_handles", "rlm_query"]);
+    expect([...tools.keys()]).toEqual(["rlm_load", "rlm_peek", "llm_query", "llm_query_batched", "rlm_handles", "rlm_wait", "rlm_jobs", "rlm_query"]);
     expect(setup(undefined, 2).tools.has("rlm_query")).toBe(false);
     expect(setup({ maxDepth: 0 }).tools.has("rlm_query")).toBe(false);
     expect([...tools.values()].every((t) => t.exposure === "codemode")).toBe(true);
@@ -297,5 +298,36 @@ describe("restoreStructuredResults", () => {
     expect(h({ toolName: "rlm_load", isError: false, details: { handle: "a" }, structuredContent: { handle: "a" } })).toBeUndefined();
     expect(h({ toolName: "rlm_load", isError: true, details: { handle: "a" } })).toBeUndefined();
     expect(h({ toolName: "bash", isError: false, details: { x: 1 } })).toBeUndefined();
+  });
+});
+
+describe("background jobs", () => {
+  it("starts llm_query, llm_query_batched and rlm_query in the background and collects them with rlm_wait", async () => {
+    const { call, children } = setup();
+    const load = (await call("rlm_load", { text: "alpha\nbeta" })).structuredContent as { handle: string };
+    const one = (await call("llm_query", { prompt: "q", handle: load.handle, background: true })).structuredContent as { job: string; status: string; model: string };
+    expect(one).toMatchObject({ status: "running", model: "llamacpp/flint" });
+    const batch = (await call("llm_query_batched", { queries: [{ prompt: "a" }, { prompt: "FAIL" }], background: true })).structuredContent as { job: string };
+    const child = (await call("rlm_query", { task: "trace it", background: true })).structuredContent as { job: string };
+
+    // rlm_wait accepts the start results themselves
+    const r = (await call("rlm_wait", { jobs: [one, batch, child] })).structuredContent as { done: { job: string; result: Record<string, unknown> }[]; pending: unknown[] };
+    expect(r.pending).toEqual([]);
+    const byJob = Object.fromEntries(r.done.map((d) => [d.job, d.result]));
+    expect(byJob[one.job]).toMatchObject({ text: expect.stringMatching(/^len=/), truncated: false });
+    expect((byJob[batch.job] as { results: unknown[] }).results).toEqual([expect.objectContaining({ text: "len=1" }), { error: "worker llamacpp/flint failed: worker down" }]);
+    expect(byJob[child.job]).toMatchObject({ answer: "child@1: trace it", depth: 1, model: "llamacpp/flint" });
+    expect(children).toHaveLength(1);
+  });
+
+  it("validates context and model before starting, lists and cancels jobs", async () => {
+    const { call } = setup();
+    await expect(call("llm_query", { prompt: "q", text: "x", file: "a", background: true })).rejects.toThrow("give only one of");
+    await expect(call("llm_query", { prompt: "q", model: "nope", background: true })).rejects.toThrow("provider/model");
+    const started = (await call("llm_query", { prompt: "q", background: true })).structuredContent as { job: string };
+    const listed = (await call("rlm_jobs", {})).structuredContent as { jobs: { job: string }[] };
+    expect(listed.jobs.map((j) => j.job)).toContain(started.job);
+    await call("rlm_wait", { job: started.job });
+    expect(((await call("rlm_jobs", {})).structuredContent as { jobs: unknown[] }).jobs).toEqual([]);
   });
 });

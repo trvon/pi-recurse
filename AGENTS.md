@@ -2,7 +2,7 @@
 
 ## Purpose
 
-pi-recurse is a Pi extension that adds Recursive Language Model (RLM) tools for Pi's `codemode`: `rlm_load`, `rlm_peek`, `llm_query`, `llm_query_batched`, `rlm_handles`, and the recursive `rlm_query`. Large input is held by handle in the extension; codemode scripts explore it and fan out sub-queries to a worker model.
+pi-recurse is a Pi extension that adds Recursive Language Model (RLM) tools for Pi's `codemode`: `rlm_load`, `rlm_peek`, `llm_query`, `llm_query_batched`, `rlm_handles`, the recursive `rlm_query`, and `rlm_wait` / `rlm_jobs` for calls started with `background: true`. Large input is held by handle in the extension; codemode scripts explore it and fan out sub-queries to a worker model.
 
 Stack: strict TypeScript, ES2022, TypeBox, Vitest, and Biome. Targets `@earendil-works/pi-coding-agent` >= 1.4.
 
@@ -14,6 +14,7 @@ src/config.ts    config files (~/.pi/agent/pi-recurse.json, .pi/pi-recurse.json)
 src/handles.ts   in-memory handle store: load, ranges, grep
 src/worker.ts    worker model calls: model resolution, budget, concurrency
 src/limiter.ts   FIFO concurrency limiter
+src/jobs.ts      background jobs per session: start, wait, cancel, dispose
 src/tools.ts     model-facing tool definitions
 src/child.ts     rlm_query sub-agent: in-process SDK session with codemode and the tools one level deeper
 ```
@@ -23,6 +24,7 @@ src/child.ts     rlm_query sub-agent: in-process SDK session with codemode and t
 - Tools default to `exposure: "codemode"` and return `structuredContent` matching their `outputSchema`; keep both in sync.
 - Never return a whole handle by default: peeks are capped, and sub-query prompts are bounded by `maxPromptChars`.
 - `rlm_query` children share the parent's handle store and worker (budget, concurrency); `runChild` is injected into `registerTools` so tests never start real sessions.
+- Background jobs belong to one session's `JobStore`: the root store is disposed on `session_shutdown`, a child's when `runChild` returns. Never let a job outlive its session.
 - Children stay read-only (`CHILD_EXCLUDED_TOOLS`) and load no extensions, skills or context files besides codemode and pi-recurse.
 - Model calls go through `ctx.modelRegistry` only; no direct HTTP clients or API keys in this package.
 - Keep `scripts/package-smoke.mjs` working with both npm <= 11 (array) and npm 12 (object) `npm pack --json` output.

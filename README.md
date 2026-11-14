@@ -38,6 +38,10 @@ Tools are codemode-only by default (`exposure: "codemode"`). They return structu
 | `llm_query_batched({ queries: [...] })` | Run worker queries up to `concurrency`. Return the same status/usage fields in ordered results with per-item errors; report progress. |
 | `rlm_query({ task, handle?, file?, lines?, chars?, text?, model? })` | Run a child session one level deeper. Return `{ answer, depth, model, handle? }`. Children have no `bash`, `edit` or `write`. Unavailable at `maxDepth`. |
 | `rlm_handles({ drop? })` | List handles or drop them to free memory. |
+| `rlm_wait({ jobs?, any?, timeout_ms? })` | Collect background jobs. Return `{ done, pending }`; each done item's `result` is what the call would have returned. Pending jobs keep running. |
+| `rlm_jobs({ cancel? })` | List background jobs without collecting them, or cancel running ones. |
+
+`llm_query`, `llm_query_batched` and `rlm_query` take `background: true` to return `{ job }` at once. The model can keep working (read files, search, plan) while a slow worker runs, then collect the answers with `rlm_wait`. Jobs end with their session; before the agent finishes, pi-recurse reminds it once of jobs it has not collected.
 
 ## Configuration
 
